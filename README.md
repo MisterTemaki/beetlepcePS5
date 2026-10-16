@@ -1,5 +1,7 @@
 # Beetle PCE PS5
 
+![Beetle PCE PS5: TurboGrafx-16 for PS5](docs/banner.jpg)
+
 [Beetle PCE](https://github.com/libretro/beetle-pce-libretro) -- Mednafen's accurate PC Engine emulator, the
 "pce" module, through its libretro port -- running on a jailbroken PS5 as a **native home-screen app** with its own
 icon and background. One app plays the whole family:
@@ -607,5 +609,3 @@ The build has three stages:
 ---
 
 Made in Brazil
-
-![Beetle PCE PS5](ps5/app/sce_sys/background-source.png)
