@@ -271,6 +271,30 @@ MDFN_COLD int PCE_Load(const uint8_t *data, size_t size, const char *ext)
 {
 	IsSGX = false;
 
+	/* Mednafen 1.32.1's check (HuC_Load): the extended Street Fighter II mapper ends at 8.5 MiB; a bigger card image
+	 * would overrun its bank tables. Refused here, before anything is set up, as Mednafen refuses it. */
+	{
+		const uint64 len = (size & 512) ? size - 512 : size;
+		uint64 m_len = (len + 8191) & ~8191;
+		const bool mcg = len >= 8192 && !memcmp(data + ((size & 512) ? 512 : 0) + 0x1FD0, "MCGENJIN", 8);
+
+		if(!mcg && m_len >= 2048 * 1024)
+		{
+			if(m_len < (512 * 1024 * 6))
+				m_len = 512 * 1024 * 5;
+			else if(m_len - 512 * 1024 > 0x80000000ULL)
+				m_len = ~0ULL;
+			else
+				m_len = (uint64)round_up_pow2((uint32)(m_len - 512 * 1024)) + 512 * 1024;
+
+			if(m_len > 8912896)
+			{
+				MDFN_DispMessage("ROM image is too large for extended SF2 mapper!");
+				return 0;
+			}
+		}
+	}
+
 	LoadCommonPre();
 
 	uint32 crc;
