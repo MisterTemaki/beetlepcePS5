@@ -23,6 +23,40 @@
 
 static int flags, checked = 0;
 
+#if ARCH_X86 && !defined(HAVE_X86_CPUID_TEST)
+/* libretro builds carry no CPUID test: with ARCH_X86 the flags are those of the build's own target (-march), which
+ * any CPU running it has anyway -- so OwlResampler takes its SSE / AVX paths instead of the plain C one. */
+int ff_get_cpu_flags_x86(void)
+{
+   int f = CPUTEST_FLAG_CMOV;
+#ifdef __MMX__
+   f |= CPUTEST_FLAG_MMX;
+#endif
+#ifdef __SSE__
+   f |= CPUTEST_FLAG_MMX2 | CPUTEST_FLAG_SSE;
+#endif
+#ifdef __SSE2__
+   f |= CPUTEST_FLAG_SSE2;
+#endif
+#ifdef __SSE3__
+   f |= CPUTEST_FLAG_SSE3;
+#endif
+#ifdef __SSSE3__
+   f |= CPUTEST_FLAG_SSSE3;
+#endif
+#ifdef __SSE4_1__
+   f |= CPUTEST_FLAG_SSE4;
+#endif
+#ifdef __SSE4_2__
+   f |= CPUTEST_FLAG_SSE42;
+#endif
+#ifdef __AVX__
+   f |= CPUTEST_FLAG_AVX;
+#endif
+   return f;
+}
+#endif
+
 
 void cputest_force_flags(int arg)
 {
