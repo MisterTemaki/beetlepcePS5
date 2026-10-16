@@ -669,7 +669,7 @@ static void ReadM3U(std::vector<std::string> &file_list, std::string path, unsig
             goto end;
          }
 
-         ReadM3U(file_list, efp, depth++);
+         ReadM3U(file_list, efp, depth + 1); /* depth + 1: depth++ passed the same depth on, and two .m3u naming each other recursed until the stack ran out */
       }
       else
          file_list.push_back(efp);
@@ -698,10 +698,24 @@ static bool MDFNI_LoadCD(const char *path, const char *ext)
 
       ReadM3U(file_list, path);
 
+      /* every disc must open (a missing one would be a NULL in the list); the first is the one inserted */
+      ret = !file_list.empty();
       for(unsigned i = 0; i < file_list.size(); i++)
       {
          CDIF *cdif = CDIF_Open(file_list[i].c_str(), cdimagecache);
+         if (!cdif)
+         {
+            ret = false;
+            break;
+         }
          CDInterfaces.push_back(cdif);
+      }
+
+      if (!ret)
+      {
+         for(unsigned i = 0; i < CDInterfaces.size(); i++)
+            delete CDInterfaces[i];
+         CDInterfaces.clear();
       }
    }
    else
@@ -1081,6 +1095,11 @@ static void check_variables(bool loaded)
             setting_pce_psgrevision = 1;
       }
 
+   }
+
+   /* The pad types (2 or 6 buttons) on every options update, not only before a game loads: a change applies at
+    * once. */
+   {
       char key[64] = {0};
 
       var.key = key;
@@ -1414,9 +1433,12 @@ bool retro_load_game(const struct retro_game_info *info)
       /* Content path information is only required
        * if we do not have a valid data buffer */
       if (!content_data)
-      {
          content_path = info_ext->full_path;
 
+      /* The extension in both cases: PCE_Load() starts a .sgx HuCard as a SuperGrafx game, from a file or from
+       * a buffer (a HuCard read out of an archive). */
+      if (info_ext->ext)
+      {
          strncpy(content_ext, info_ext->ext, sizeof(content_ext));
          content_ext[sizeof(content_ext) - 1] = '\0';
       }
@@ -2170,6 +2192,7 @@ void MDFN_DispMessage(const char *format, ...)
    msg.msg    = strc;
 
    environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
+   free(str); /* the frontend copies the message */
 }
 
 void MDFN_MidSync(EmulateSpecStruct *espec)
