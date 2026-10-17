@@ -13,6 +13,7 @@
 
 #include "ProsperoNotify.h"
 #include "fe_games.h"
+#include "fe_i18n.h"
 #include "fe_settings.h"
 #include "fe_text.h"
 
@@ -158,6 +159,19 @@ const ConsoleButton kConsoleButtons[kConsoleButtonCount] = {
 
 namespace
 {
+using fe::T;
+
+// printf into a std::string (the translated formats)
+std::string Fmt(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+std::string Fmt(const char* fmt, ...)
+{
+	char buf[1024];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	return buf;
+}
 constexpr int kTargetQueued = ps5audio::kRate * 60 / 1000; // 60 ms of sound
 constexpr int kRewindEvery = 3; // frames between rewind snapshots
 constexpr size_t kRewindBytes = 192u * 1024 * 1024;
@@ -850,7 +864,7 @@ bool ReadHuCard(const std::string& path, std::string* inner, std::string* error)
 		{
 			OrbisLog("[emu] could not start %s: no game inside the zip", path.c_str());
 			if (error)
-				*error = "There is no game Beetle PCE PS5 knows inside " + file + ".";
+				*error = Fmt(T("There is no game Beetle PCE PS5 knows inside %s."), file.c_str());
 			return false;
 		}
 	}
@@ -858,7 +872,7 @@ bool ReadHuCard(const std::string& path, std::string* inner, std::string* error)
 	{
 		OrbisLog("[emu] could not read %s (%zu bytes)", path.c_str(), g.rom.size());
 		if (error)
-			*error = "Beetle PCE PS5 could not read " + file + ".";
+			*error = Fmt(T("Beetle PCE PS5 could not read %s."), file.c_str());
 		return false;
 	}
 	const size_t skip = fe::HuCardHeader(g.rom.size());
@@ -882,7 +896,7 @@ bool LoadGame(const std::string& path, std::string* error)
 		// the console's PATH_MAX; the CD readers build the tracks' paths from the sheet's
 		OrbisLog("[emu] could not start: the path is %zu characters long (%s)", path.size(), path.c_str()); // the length first: the log cuts long lines
 		if (error)
-			*error = "The path of " + file + " is too long (over 1023 characters): move it to a shorter folder.";
+			*error = Fmt(T("The path of %s is too long (over 1023 characters): move it to a shorter folder."), file.c_str());
 		return false;
 	}
 	std::string ext = ExtOf(path);
@@ -931,11 +945,12 @@ bool LoadGame(const std::string& path, std::string* error)
 			OrbisLog("[emu] missing firmware: no System Card (checked before loading)");
 			OrbisLog("[emu] could not start %s: no System Card in %s", path.c_str(), g.sys_dir.c_str());
 			if (error)
-				*error = *chosen ? "The System Card chosen in the settings (" + std::string(chosen) + ") isn't in " +
-										 g.sys_dir + "/. Copy it there, or choose Auto, and try again."
-								 : "PC Engine CD games need a System Card: syscard3.pce (Super CD-ROM² System Card 3.0, "
-								   "the one most games need). Copy it to " +
-										 g.sys_dir + "/ and try again.";
+				*error = *chosen ? Fmt(T("The System Card chosen in the settings (%s) isn't in %s/. Copy it there, or choose "
+										   "Auto, and try again."),
+									   chosen, g.sys_dir.c_str())
+								 : Fmt(T("PC Engine CD games need a System Card: syscard3.pce (Super CD-ROM² System Card 3.0, "
+										   "the one most games need). Copy it to %s/ and try again."),
+									   g.sys_dir.c_str());
 			g.path.clear();
 			return false;
 		}
@@ -970,11 +985,11 @@ bool LoadGame(const std::string& path, std::string* error)
 		if (error)
 		{
 			if (g.system == fe::System::Cd)
-				*error = "Beetle PCE could not start " + file + " with " + g.bios + ". Check that the disc's files are " +
-					"complete (a .cue needs its tracks next to it); Games Express discs need gexpress.pce in " +
-					g.sys_dir + ".";
+				*error = Fmt(T("Beetle PCE could not start %s with %s. Check that the disc's files are complete (a .cue needs "
+							   "its tracks next to it); Games Express discs need gexpress.pce in %s."),
+					file.c_str(), g.bios.c_str(), g.sys_dir.c_str());
 			else
-				*error = "Beetle PCE could not load " + file + ".";
+				*error = Fmt(T("Beetle PCE could not load %s."), file.c_str());
 		}
 		g.path.clear();
 		g.rom.clear();
@@ -1051,7 +1066,7 @@ void Resume()
 
 void Osd(const std::string& text)
 {
-	g.osd = text;
+	g.osd = T(text.c_str());
 	g.osd_until = Now() + 2.5;
 }
 
@@ -1063,7 +1078,10 @@ bool SaveState(int slot)
 	std::vector<uint8_t> data(size);
 	bool ok = size > 0 && retro_serialize(data.data(), size) && WriteFileAtomic(StatePath(slot), data.data(), size);
 	OrbisLog("[emu] save state %d: %s (%zu bytes)", slot, ok ? "ok" : "failed", size);
-	Osd(ok ? "State saved to slot " + std::to_string(slot) : "Could not save the state");
+	if (ok)
+		Osd(Fmt(T("State saved to slot %d"), slot));
+	else
+		Osd("Could not save the state");
 	return ok;
 }
 
@@ -1074,12 +1092,15 @@ bool LoadState(int slot)
 	std::vector<uint8_t> data;
 	if (!ReadFile(StatePath(slot), data) || data.empty())
 	{
-		Osd("Slot " + std::to_string(slot) + " is empty");
+		Osd(Fmt(T("Slot %d is empty"), slot));
 		return false;
 	}
 	const bool ok = retro_unserialize(data.data(), data.size());
 	OrbisLog("[emu] load state %d: %s", slot, ok ? "ok" : "failed");
-	Osd(ok ? "State loaded from slot " + std::to_string(slot) : "Could not load the state");
+	if (ok)
+		Osd(Fmt(T("State loaded from slot %d"), slot));
+	else
+		Osd("Could not load the state");
 	if (ok)
 		RewindClear();
 	return ok;
@@ -1109,7 +1130,7 @@ void PowerCycle()
 	if (!LoadGame(path, &error))
 	{
 		OrbisLog("[emu] power cycle: %s", error.c_str());
-		ProsperoNotify("Beetle PCE PS5: the game could not be started again. %s", error.c_str());
+		ProsperoNotify(T("Beetle PCE PS5: the game could not be started again. %s"), error.c_str());
 	}
 }
 
@@ -1149,7 +1170,7 @@ FrameResult RunFrame()
 		else if (pressed & (SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT))
 		{
 			cfg.state_slot = (pressed & SCE_PAD_BUTTON_RIGHT) ? cfg.state_slot % 10 + 1 : (cfg.state_slot + 8) % 10 + 1;
-			Osd("State slot " + std::to_string(cfg.state_slot) + (StateExists(cfg.state_slot) ? " (used)" : " (empty)"));
+			Osd(Fmt(T(StateExists(cfg.state_slot) ? "State slot %d (used)" : "State slot %d (empty)"), cfg.state_slot));
 			OrbisLog("[emu] state slot %d", cfg.state_slot);
 			cfg.Save();
 		}

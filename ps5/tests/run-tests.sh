@@ -10,6 +10,8 @@ INSTALLER=$PWD/build/host/pce-ps5-installer
 HELPER=$PWD/build/host/pce-ps5-helper
 # ports nobody listens on, so the app's ordinary runs find no helper and no ELF loader
 export PCEPS5_HELPER_PORT=$((20000 + RANDOM % 10000)) PCEPS5_ELFLDR_PORT=$((30000 + RANDOM % 10000)) PCEPS5_JB_NO_OTHERS=1
+# the debug logs are off by default (1.0.1): the tests read boot.log, so here a settings file without the key means on
+export PCEPS5_LOGS_DEFAULT=1
 CHECK="python3 $PWD/tests/check_ppm.py"
 RECT="python3 $PWD/tests/check_rect.py"
 ROM="python3 $PWD/tests/make_test_rom.py"
@@ -789,6 +791,13 @@ expect "[ \"\$(cat $T/root/logs/boot.log)\" = 'OLD RUN' ] && [ ! -e $T/root/logs
 expect "! grep -q '^\[pce-ps5' $T/out.txt" "nothing on stdout either"
 expect "grep -q '^debug_logs=0' $T/root/pce-ps5.ini" "the setting stays off"
 nosan "$T"
+# the default (1.0.1): no debug_logs key and no test override -> nothing written, and the settings file says 0
+T=$(newroot t25z)
+$ROM "$T/root/roms/test.pce" >/dev/null
+rc=$(PCEPS5_LOGS_DEFAULT= run "$T" "0:0;$(QUITAT 100)" "90" "$T/root/roms/test.pce")
+expect "[ $rc = 0 ] && [ ! -e $T/root/logs/boot.log ] && ! grep -q '^\[pce-ps5' $T/out.txt" "debug logs off by default: no boot.log"
+expect "grep -q '^debug_logs=0' $T/root/pce-ps5.ini" "the default settings file has debug_logs=0"
+nosan "$T"
 # Settings (Triangle) -> Debug logs (Up three times from Shader: Back, Updates, then Debug logs) -> Off: that line is the last one
 T=$(newroot t25b)
 $ROM "$T/root/roms/test.pce" >/dev/null
@@ -803,7 +812,7 @@ $ROM "$T/root/roms/test.pce" >/dev/null
 echo "debug_logs=0" >>"$T/root/pce-ps5.ini"
 rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;60:$UP;62:0;65:$UP;67:0;70:$CROSS;72:0;90:$CIRCLE;92:0;$(SHELFQUIT_AT 120)" "")
 expect "grep -q '^debug_logs=1' $T/root/pce-ps5.ini" "Debug logs On saved"
-expect "grep -q 'debug logs turned on' $T/root/logs/boot.log && ! grep -q 'Beetle PCE PS5 1\.[0-9], Beetle PCE' $T/root/logs/boot.log" "boot.log starts at the switch (nothing from before it)"
+expect "grep -q 'debug logs turned on' $T/root/logs/boot.log && ! grep -q 'Beetle PCE PS5 1\.[0-9.]*, Beetle PCE' $T/root/logs/boot.log" "boot.log starts at the switch (nothing from before it)"
 nosan "$T"
 # the helper follows the setting too
 stop_helpers25() { pkill -f 'build/host/pce-ps5-(installer|helper)' 2>/dev/null; sleep 0.3; }
@@ -983,6 +992,65 @@ expect "[ \$(grep -c '^sys:' $T/root/covers/crc-cache.txt) = 800 ] && [ \$(grep 
 rc=$(run "$T" "0:0;100:$OPTIONS;102:0;110:$CROSS;112:0" "")
 second=$(scan_time $T/root/logs/boot.log)
 expect "python3 -c 'import sys; sys.exit(0 if float(\"$first\") < 4 and float(\"$second\") < 2 else 1)'" "first scan ${first} s (under 4), the next ${second} s (under 2)"
+nosan "$T"
+fi
+
+if want 30; then
+echo "== 30. languages: English by default; Spanish, Portuguese (Brazil), French and German translated"
+expect "python3 $PWD/tests/check_i18n.py $PWD/frontend/fe_i18n.cpp >/dev/null" "every translation has its five languages and the English format specifiers"
+for L in 1 2 3 4; do
+	T=$(newroot t30_$L)
+	echo "language=$L" >>"$T/root/pce-ps5.ini"
+	$ROM "$T/root/roms/Alpha (USA).pce" >/dev/null
+	# the settings screen scrolled through, then a game's pause menu
+	pad="0:0;20:$TRIANGLE;22:0"; f=30
+	for i in $(seq 1 50); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 6)); done
+	pad="$pad;$((f + 4)):$CIRCLE;$((f + 6)):0;$((f + 20)):$CROSS;$((f + 22)):0"; f=$((f + 120))
+	pad="$pad;$f:$L3R3;$((f + 2)):0"; f=$((f + 10))
+	for i in $(seq 1 9); do pad="$pad;$f:$DOWN;$((f + 2)):0"; f=$((f + 8)); done
+	pad="$pad;$((f + 10)):$UP;$((f + 12)):0;$((f + 20)):$CROSS;$((f + 22)):0"
+	rm -f $T/missing.txt
+	rc=$(PCEPS5_HOST_I18N_MISSING=$T/missing.txt run "$T" "$pad" "")
+	# what was shown untranslated: only names (the game's, the buttons', the languages') and texts already translated
+	python3 - $T/missing.txt $PWD/frontend/fe_i18n.cpp > $T/untranslated.txt <<'PY'
+import os, re, sys
+src = open(sys.argv[2], encoding='utf-8').read()
+translated = set(re.findall(r'"((?:[^"\\]|\\.)*)"', src))
+spec = re.compile(r'%(?:%|[-+ #0]*\d*(?:\.\d+)?(?:hh|h|ll|l|z)?[diouxXeEfgGcsp])')
+# a text printed from a translated format: the format as a pattern
+formats = [re.compile('^' + ''.join('.*' if spec.fullmatch(part) else re.escape(part)
+                                    for part in re.split('(' + spec.pattern + ')', f)) + '$')
+           for f in translated if '%' in f]
+names = {'Alpha (USA)', 'I', 'II', 'Select', 'Run', 'L1', 'R1', 'OPTIONS', 'English', 'Español', 'Português (Brasil)',
+         'Français', 'Deutsch', 'RGB', 'PC Engine', 'SuperGrafx', 'PC Engine CD', 'HuC6280 (PC Engine)'}
+for line in (open(sys.argv[1], encoding='utf-8') if os.path.exists(sys.argv[1]) else []):
+    t = line.rstrip('\n')
+    if t in translated or t in names or not re.search('[A-Za-z]{2}', t) or re.fullmatch(r'[\d%. ]+', t):
+        continue
+    if any(f.match(t) for f in formats):
+        continue
+    # the shelf's composed lines: the tab ("↣  " + a translated family name), the game's system/format line
+    if t.startswith('↣') or re.match(r'(PC Engine|PC Engine CD|SuperGrafx) {3}', t):
+        continue
+    if t.startswith('System Card ') or t.startswith('crt-'):
+        continue
+    print(t)
+PY
+	expect "[ $rc = 0 ] && [ -s $T/missing.txt ] && [ ! -s $T/untranslated.txt ]" "language $L: every menu text shown is translated ($(head -c 200 $T/untranslated.txt | tr '\n' '|'))"
+	expect "grep -q '^language=$L$' $T/root/pce-ps5.ini" "language $L: kept in the settings file"
+	nosan "$T"
+done
+# English stays the default: no setting, English on the screen (the texts pass through as they are)
+T=$(newroot t30en)
+$ROM "$T/root/roms/test.pce" >/dev/null
+rc=$(PCEPS5_HOST_I18N_MISSING=$T/missing.txt run "$T" "0:0;$(QUITAT 100)" "" "$T/root/roms/test.pce")
+expect "[ $rc = 0 ] && [ ! -s $T/missing.txt ] && grep -q '^language=0$' $T/root/pce-ps5.ini" "English by default (language=0): nothing is looked up"
+nosan "$T"
+# the Language row (SYSTEM): Settings, Up four times from Shader (Back, Updates, Debug logs, Language), Right -> Español
+T=$(newroot t30row)
+$ROM "$T/root/roms/test.pce" >/dev/null
+rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;56:$UP;58:0;62:$UP;64:0;68:$UP;70:0;76:$RIGHT;78:0;90:$CIRCLE;92:0;100:$OPTIONS;102:0;110:$CROSS;112:0" "")
+expect "[ $rc = 0 ] && grep -q '^language=1$' $T/root/pce-ps5.ini" "Settings, SYSTEM, Language: Right picks Español, saved as language=1"
 nosan "$T"
 fi
 

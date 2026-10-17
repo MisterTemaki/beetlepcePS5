@@ -34,7 +34,7 @@ Everything outside `ps5/` is Beetle PCE's source (the original README is
 [README-Beetle-PCE.md](README-Beetle-PCE.md)), with a few changes listed in [The core](#the-core). The frontend
 drives the core through its libretro interface and plays the part RetroArch plays on a PC.
 
-> **Status (1.0):** builds with the ps5-payload-dev SDK into a signed native app, and passes 271 host tests, which
+> **Status (1.0.1):** builds with the ps5-payload-dev SDK into a signed native app, and passes 291 host tests, which
 > run the same code (the Beetle PCE core included) on Linux with the PS5 calls simulated: a test HuCard (made by
 > `ps5/tests/make_test_rom.py`) is played through the whole chain -- the shelf, the pad, the core, the video and
 > sound output -- as a PC Engine card, a SuperGrafx card, a card with a copier header, a reversed TurboGrafx-16
@@ -101,9 +101,12 @@ next to Genesis Plus GX PS5 (PPSA99921, helper port 9088), Snes9x PS5 (PPSA99922
 
 ## Versions
 
-Every release carries its version in the file name: `BeetlePCEPS5-v1.0.elf` and `pce-ps5-v1.0-src.zip`
+Every release carries its version in the file name: `BeetlePCEPS5-v1.0.1.elf` and `pce-ps5-v1.0.1-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`BeetlePCEPS5.elf`" always means the current release's ELF.
+
+**1.0.1:** the interface in five languages (English, Spanish, Portuguese (Brazil), French, German: Settings,
+SYSTEM, Language); the debug logs are off by default.
 
 **1.0:** the first release.
 
@@ -133,7 +136,11 @@ ELF. The same zip is what the homebrew catalog lists.
 
 ## Language
 
-Every screen and notification of Beetle PCE PS5 is in English.
+Settings (Triangle on the shelf), **SYSTEM**, **Language**: **English** (the default), **Español**, **Português
+(Brasil)**, **Français**, **Deutsch**. The change applies at once, to every menu and message, and is kept in
+`pce-ps5.ini` (`language=0` to `4`). The logs stay in English, and so do the notifications sent before the settings
+are read (the covers downloaded at start) or by the helper (a new version available). Game names, the PS5's and the
+PC Engine's button names, the System Cards' and the shaders' names are not translated.
 
 ## Requirements
 
@@ -146,10 +153,10 @@ Every screen and notification of Beetle PCE PS5 is in English.
 
 1. **Send `BeetlePCEPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < BeetlePCEPS5-v1.0.elf
+   nc -q0 PS5_IP 9021 < BeetlePCEPS5-v1.0.1.elf
    ```
    It installs the app in `/data/homebrew/PPSA99925/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the
-   icon and the backgrounds), shows **"Beetle PCE PS5 1.0 installed. Open it from the Beetle PCE PS5 icon on the
+   icon and the backgrounds), shows **"Beetle PCE PS5 1.0.1 installed. Open it from the Beetle PCE PS5 icon on the
    home screen."** and stays running as the helper.
 2. **Open the Beetle PCE PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your games** to their system's folder, over FTP for example. The app makes the folders on its first
@@ -377,7 +384,7 @@ setting.
   **Default button layout** puts them back). L2, R2, L3 and R3 stay for the hot keys and menus, and the menus always
   use Cross / Circle.
 - **Library:** download covers.
-- **System:** **Debug logs** (On by default) -- see [Debugging](#debugging-logs-and-crashes); **Updates** -- see
+- **System:** **Language** -- see [Language](#language); **Debug logs** (Off by default since 1.0.1) -- see [Debugging](#debugging-logs-and-crashes); **Updates** -- see
   [Updates](#updates).
 
 Changes apply at once, in the game too, and are saved in `pce-ps5.ini`; the sound chip, the System Card and the
@@ -453,8 +460,8 @@ screen columns, monoCRT has no beam jitter.
 logs were turned off) or to the console output, and the next starts -- the app, the installer and the helper --
 write no log files at all; the files of earlier runs are left as they are (delete them over FTP if you want). On
 starts again at once, adding to `boot.log`. The setting is `debug_logs=0` / `debug_logs=1` in
-`pce-ps5.ini`. Leave them on if you want to report a problem: with them off there is no log to send, and no
-`== CRASH ==` report either.
+`pce-ps5.ini`; with no `debug_logs` line (the default since 1.0.1) they are off. Turn them on if you want to
+report a problem: with them off there is no log to send, and no `== CRASH ==` report either.
 
 If something fails, send the files in `/data/pce/logs/`: `boot.log` (the app), `installer.log` and
 `helper.log`, plus the previous session's `.prev.log` files. They record every step:
