@@ -52,6 +52,7 @@ struct Settings
 	int language = 0;            // fe::Language: 0 English (the default), 1 Spanish, 2 Portuguese (Brazil), 3 French, 4 German
 	bool debug_logs = false;     // boot.log and the others in /data/pce/logs (OrbisLogSetEnabled)
 	int shelf_family = 0; // fe::Family the shelf shows
+	int last_tab = 0; // the shelf's storage tab (fe_tabs.h): 0 Internal, 1 USB, 2 Network
 	std::string last_rom; // the shelf puts the selection on this game
 
 	void Load();

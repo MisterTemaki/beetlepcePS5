@@ -20,6 +20,8 @@
 #include "ProsperoSce.h"
 #include "ProsperoVideo.h"
 
+#include "netfs.h"
+
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
@@ -251,6 +253,7 @@ enum SettingRow
 	S_BTN_DEFAULT,
 	H_LIBRARY,
 	S_COVERS,
+	S_NETWORK, // Network shares: a screen of its own (fe_netscreen.cpp); not over a game (its files may be on a share)
 	H_SYSTEM,
 	S_LANGUAGE,
 	S_DEBUGLOGS,
@@ -357,6 +360,18 @@ void UpdateAction()
 	PollUpdate(true);
 }
 
+// The Network shares row: how many shares are set up, and how many of them are connected.
+std::string NetworkSummary()
+{
+	const std::vector<NetfsShareInfo> shares = netfs_shares();
+	if (shares.empty())
+		return "None";
+	int ready = 0;
+	for (const NetfsShareInfo& i : shares)
+		ready += i.state == NetfsState::Ready;
+	return Fmt(T("%d of %d connected"), ready, int(shares.size()));
+}
+
 Row SettingRowFor(int s)
 {
 	const Settings& c = Config();
@@ -401,6 +416,7 @@ Row SettingRowFor(int s)
 		case S_BTN_DEFAULT: return {"Default button layout", ""};
 		case H_LIBRARY: return {"LIBRARY", "", true, true};
 		case S_COVERS: return {"Download covers", OnOff(c.covers_download)};
+		case S_NETWORK: return {"Network shares", NetworkSummary()};
 		case H_SYSTEM: return {"SYSTEM", "", true, true};
 		case S_LANGUAGE: return {"Language", LanguageName(c.language)};
 		case S_DEBUGLOGS: return {"Debug logs", OnOff(c.debug_logs)};
@@ -492,7 +508,11 @@ std::vector<Row> SettingRows()
 {
 	std::vector<Row> rows;
 	for (int s = 0; s < S_COUNT; s++)
+	{
 		rows.push_back(SettingRowFor(s));
+		if (s == S_NETWORK && emu::GameLoaded())
+			rows.back().enabled = false; // changing the shares reconnects them: not while a game may be reading from one
+	}
 	rows.push_back({"Back", ""});
 	return rows;
 }
@@ -531,14 +551,24 @@ void SettingsScreen(bool over_game)
 			Footer(std::string(icon::Cross) + " " + T("Change") + "     " + icon::DpadLeftRight + " " + T("Adjust") + "     " + icon::Circle + " " + T("Back"));
 		Present();
 		const Nav n = nav.Read();
-		if (n.up)
-			sel = Step(sel, -1, rows);
-		if (n.down)
-			sel = Step(sel, 1, rows);
+		if (n.up || n.down)
+		{
+			sel = Step(sel, n.up ? -1 : 1, rows);
+			if (sel == S_NETWORK && !rows[size_t(sel)].enabled)
+				sel = Step(sel, n.up ? -1 : 1, rows); // over a game the Network shares row is passed over
+		}
 		if (sel == S_UPDATES)
 		{
 			if (n.ok)
 				UpdateAction();
+		}
+		else if (sel == S_NETWORK)
+		{
+			if (n.ok && rows[size_t(sel)].enabled)
+			{
+				NetworkMenu();
+				nav = NavReader();
+			}
 		}
 		else if (sel < S_COUNT && (n.left || n.right || n.ok))
 			ChangeSetting(sel, n.left ? -1 : 1);

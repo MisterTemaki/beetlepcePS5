@@ -27,6 +27,8 @@
 #include "libretro.h"
 #include "zlib.h"
 
+#include "netfs.h"
+
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -253,7 +255,7 @@ struct State
 	bool loaded = false;
 	std::string path, name, dir, ext; // the game; ext without the dot
 	fe::System system = fe::System::Pce;
-	std::vector<uint8_t> rom; // a HuCard, read here (from its file or a .zip) and put right when reversed
+	std::vector<uint8_t> rom; // a HuCard, read here (from its file, a .zip or a .7z) and put right when reversed
 	retro_game_info_ext info_ext = {};
 	std::string sys_dir, save_dir;
 
@@ -853,18 +855,20 @@ void ApplySettings()
 		RewindClear();
 }
 
-// The HuCard, read here rather than by the core: from its file or from a .zip, and a TurboGrafx-16 dump with its
+// The HuCard, read here rather than by the core: from its file or from a .zip or .7z, and a TurboGrafx-16 dump with its
 // data lines reversed put right (the core would start it as garbage).
 bool ReadHuCard(const std::string& path, std::string* inner, std::string* error)
 {
 	const std::string file = path.substr(path.find_last_of('/') + 1);
-	if (ExtOf(path) == ".zip")
+	if (fe::IsArchiveExt(ExtOf(path)))
 	{
-		if (!fe::ReadFromZip(path, inner, &g.rom))
+		std::string why;
+		if (!fe::ReadFromArchive(path, inner, &g.rom, &why))
 		{
-			OrbisLog("[emu] could not start %s: no game inside the zip", path.c_str());
+			OrbisLog("[emu] could not start %s: %s", path.c_str(), why.empty() ? "no game inside the archive" : why.c_str());
 			if (error)
-				*error = Fmt(T("There is no game Beetle PCE PS5 knows inside %s."), file.c_str());
+				*error = why.empty() ? Fmt(T("There is no game Beetle PCE PS5 knows inside %s."), file.c_str())
+									 : Fmt(T("Beetle PCE PS5 could not unpack %s."), file.c_str()) + " " + T(why.c_str());
 			return false;
 		}
 	}
@@ -907,11 +911,14 @@ bool LoadGame(const std::string& path, std::string* error)
 	g.bios.clear();
 	g.info_ext = retro_game_info_ext();
 
+	// a game on a share: its folder listed first (nothing for any other path); let go again if the game doesn't start
+	netfs_prepare_game(path);
 	std::string inner;
-	if (ext == ".zip" || ext == ".pce" || ext == ".sgx")
+	if (fe::IsArchiveExt(ext) || ext == ".pce" || ext == ".sgx")
 	{
 		if (!ReadHuCard(path, &inner, error))
 		{
+			netfs_end_game();
 			g.path.clear();
 			g.rom.clear();
 			return false;
@@ -951,6 +958,7 @@ bool LoadGame(const std::string& path, std::string* error)
 								 : Fmt(T("PC Engine CD games need a System Card: syscard3.pce (Super CD-ROM² System Card 3.0, "
 										   "the one most games need). Copy it to %s/ and try again."),
 									   g.sys_dir.c_str());
+			netfs_end_game();
 			g.path.clear();
 			return false;
 		}
@@ -981,6 +989,7 @@ bool LoadGame(const std::string& path, std::string* error)
 	g.mute = false;
 	if (!retro_load_game(&gi))
 	{
+		netfs_end_game();
 		OrbisLog("[emu] could not start %s", path.c_str());
 		if (error)
 		{
@@ -1020,6 +1029,9 @@ bool LoadGame(const std::string& path, std::string* error)
 	OrbisMkdirs(SaveDir("saves"));
 	OrbisMkdirs(SaveDir("states"));
 	LoadSram();
+	// from here nothing on this thread waits for a share: a CD game on one streams through netfs's cache (blocks read
+	// ahead of the core), a HuCard was read whole above
+	netfs_set_realtime(true);
 	OrbisLog("[emu] running \"%s\" (%s), %.3f fps, %.0f Hz, aspect %.4f, state size %zu", g.name.c_str(),
 		SystemName().c_str(), g.fps, g.sample_rate, g.core_aspect, retro_serialize_size());
 	return true;
@@ -1036,6 +1048,8 @@ void CloseGame()
 	g.frame.clear();
 	g.rom.clear();
 	RewindClear();
+	netfs_set_realtime(false);
+	netfs_end_game();
 	OrbisLog("[emu] game closed");
 }
 

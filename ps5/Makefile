@@ -25,7 +25,7 @@
 PS5_PAYLOAD_SDK ?= /opt/ps5-payload-sdk
 PS5_HOST ?= ps5
 PS5_PORT ?= 9021
-VERSION ?= 1.0.1
+VERSION ?= 1.1
 CORE_VERSION := 1.29.0
 TITLE_ID ?= PPSA99925
 # where the app looks for its updates (Settings, SYSTEM, Updates): this repository's GitHub releases
@@ -75,6 +75,43 @@ CORE_INCS := -I$(ROOT) -I$(ROOT)/$(MDFN) -I$(ROOT)/$(MDFN)/include -I$(ROOT)/$(M
 	-I$(ROOT)/$(DEPS)/libchdr/include -I$(ROOT)/$(DEPS)/zstd/lib -I$(ROOT)/$(ZLIB_DIR)
 CORE_CXXSTD := -std=gnu++11
 
+# netfs: network shares as folders (SMB and NFS), from Genesis Plus GX PS5 2.1.1 and Snes9x PS5 (thatboialex's design;
+# netfs/netfs_backend.h). backend_smb.cpp / backend_nfs.cpp are the protocols; the stubs (which fail with "not built in")
+# stand in for them in the netfs unit test.
+NETFS_CORE_SRC := netfs/netfs_share.cpp netfs/netfs_core.cpp netfs/netfs_cache.cpp netfs/netfs_vfs.cpp netfs/netfs_wrap.cpp netfs/netfs_edit.cpp netfs/netfs_shims_ps5.cpp
+# the libc calls netfs answers for /smb/... and /nfs/... paths (netfs/netfs_wrap.cpp has a __wrap_ function for each).
+# They go into both links as --wrap, so a call anywhere in the app (the core's file streams -- libretro-common's
+# vfs_implementation.c under Mednafen's FileStream --, libchdr, minizip, libc++'s file streams) lands in netfs first and
+# is passed on to the real call when the path or handle is not netfs's. A CD game on a share (its .cue and tracks, a
+# .chd, a .ccd's image) is read this way while the game runs (netfs_cache.h: blocks, read-ahead).
+NETFS_WRAPPED := fopen fclose fread fseek fseeko ftell ftello rewind feof ferror clearerr \
+	fileno fgetc getc ungetc fgets fflush setvbuf flockfile funlockfile open close read pread lseek fstat stat lstat \
+	access realpath opendir readdir closedir
+# glibc only: the console's libc has no 64-bit variants (off_t is 64 bits), and minizip maps its fopen64 calls to
+# fopen on FreeBSD targets (third_party/ioapi.h), so a --wrap of these would leave __real_* undefined in the console link.
+NETFS_WRAPPED_LFS64 := fopen64 fseeko64 ftello64 stat64 lstat64 fstat64 readdir64 open64 pread64 lseek64
+# console only (netfs/netfs_shims_ps5.cpp): sockets made non-blocking (fcntl, then SO_NBIO), and a getaddrinfo that works
+# in a native title
+NETFS_WRAPPED_PS5 := fcntl getaddrinfo freeaddrinfo
+NETFS_WRAP_LLD := $(foreach s,$(NETFS_WRAPPED) $(NETFS_WRAPPED_PS5),--wrap=$(s))
+NETFS_WRAP_GCC := $(foreach s,$(NETFS_WRAPPED) $(NETFS_WRAPPED_LFS64),-Wl,--wrap=$(s))
+NETFS_SRC := $(NETFS_CORE_SRC) netfs/backend_smb.cpp netfs/backend_nfs.cpp
+# libsmb2 (57fea04) and libnfs (2d368ad), LGPL-2.1-or-later, vendored with their notices as Snes9x PS5 and Genesis Plus GX
+# PS5 have them (third_party/libsmb2/README.snes9xps5, third_party/libnfs/PATCHES.md). libsmb2 is built from a config.h
+# of its folder (no CMake). It needs no PS4_PLATFORM: prospero-clang defines __FreeBSD__, which selects libsmb2's
+# FreeBSD headers. Their fcntl and getaddrinfo calls reach the console shims through the --wrap list above.
+LIBSMB2 := third_party/libsmb2
+LIBNFS := third_party/libnfs
+LIBSMB2_SRC := $(sort $(wildcard $(LIBSMB2)/lib/*.c))
+LIBNFS_SRC := $(sort $(foreach d,lib mount nfs nfs4 portmap nlm nsm rquota,$(wildcard $(LIBNFS)/$(d)/*.c)))
+LIBSMB2_INC := -I$(LIBSMB2)/include -I$(LIBSMB2)/include/smb2 -I$(LIBSMB2)/lib
+LIBSMB2_FLAGS := -I$(LIBSMB2) $(LIBSMB2_INC) -DHAVE_CONFIG_H -D_FILE_OFFSET_BITS=64 '-D_U_=__attribute__((unused))'
+LIBNFS_FLAGS := -DHAVE_CONFIG_H -I$(LIBNFS) -I$(LIBNFS)/include -I$(LIBNFS)/include/nfsc \
+	$(addprefix -I$(LIBNFS)/,mount nfs nfs4 nlm nsm portmap rquota)
+# netfs/backend_smb.cpp includes libsmb2's headers as system headers (they are not ours to keep -Werror clean)
+%/port/netfs/backend_smb.o: EXTRA_FLAGS = $(patsubst -I%,-isystem %,$(LIBSMB2_INC))
+%/port/netfs/backend_nfs.o: EXTRA_FLAGS = $(LIBNFS_FLAGS)
+
 # the app (eboot.bin): the PS5 layer and the frontend
 EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
@@ -83,7 +120,25 @@ EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/ProsperoCrash.cpp coreorbis/orbis-shims/ProsperoCrt.cpp coreorbis/orbis-shims/ProsperoUpdate.cpp \
 	frontend/fe_emu.cpp frontend/fe_menu.cpp frontend/fe_settings.cpp frontend/fe_i18n.cpp frontend/fe_text.cpp \
 	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp \
-	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp
+	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp \
+	frontend/fe_netscreen.cpp frontend/fe_osk.cpp frontend/fe_ui.cpp $(NETFS_SRC)
+# 1.1: HuCards inside a .7z (fe_7z.cpp), with the LZMA SDK 26.05's C 7z decoder (public domain; third_party/lzma7z/README.md):
+# no threads, no AES (an encrypted archive is refused), no assembler. The core already links an older LZMA SDK for libchdr
+# (deps/lzma-19.00: LzmaDec_*, Bra86, Delta, CpuArch...): every external name of this copy is prefixed pce7z_ (fe7z_names.h,
+# force-included), so the two can't meet, and lzma7z/names.ok stops the build if an object defines a name without it.
+EMU_SRC += frontend/fe_7z.cpp
+LZMA7Z := third_party/lzma7z
+LZMA7Z_SRC := $(sort $(wildcard $(LZMA7Z)/*.c))
+LZMA7Z_DEFS := -DZ7_ST -DZ7_PPMD_SUPPORT -DZ7_EXTRACT_ONLY
+LZMA7Z_FLAGS := $(LZMA7Z_DEFS) -include $(LZMA7Z)/fe7z_names.h -I$(LZMA7Z) -w
+%/port/frontend/fe_7z.o: EXTRA_FLAGS = $(LZMA7Z_DEFS) -isystem $(LZMA7Z)
+%/port/frontend/fe_7z.o: $(LZMA7Z)/fe7z_names.h
+# every global name the decoder's objects define must carry the prefix (a newer SDK may add one: put it in fe7z_names.h)
+define LZMA7Z_NAMES_CHECK
+	@bad=$$($(1) -g --defined-only $(2) | awk 'NF==3 && $$3 !~ /^(pce7z_|__odr_asan\.pce7z_)/ {print $$3}'); \
+	if [ -n "$$bad" ]; then echo "lzma7z: names without the pce7z_ prefix: $$bad (add them to $(LZMA7Z)/fe7z_names.h)"; exit 1; fi
+	@touch $@
+endef
 # minizip (zlib licence) for games inside a .zip, built as C with the core's zlib
 EMU_C_SRC := frontend/third_party/unzip.c frontend/third_party/ioapi.c
 # the payloads: the helper, and the installer (= helper + install)
@@ -98,7 +153,7 @@ MBEDTLS_SRC := $(sort $(wildcard $(MBEDTLS)/library/*.c))
 MBEDTLS_FLAGS := -I$(MBEDTLS)/include -Ifrontend '-DMBEDTLS_USER_CONFIG_FILE="fe_mbedtls_config.h"'
 INSTALLER_SRC := installer/installer_main.cpp $(HELPER_SRC) coreorbis/orbis-shims/ProsperoInstall.cpp
 
-INCS := -Icoreorbis/include-orbis -Icoreorbis/orbis-shims -Ifrontend -isystem $(ROOT)/$(LRC)/include \
+INCS := -Inetfs -Icoreorbis/include-orbis -Icoreorbis/orbis-shims -Ifrontend -isystem $(ROOT)/$(LRC)/include \
 	-isystem $(ROOT)/$(ZLIB_DIR)
 DEFS := -DPCEPS5_VERSION='"$(VERSION)"' -DPCEPS5_CORE_VERSION='"$(CORE_VERSION)"' -DPCEPS5_TITLE_ID='"$(TITLE_ID)"' -DPCEPS5_UPDATE_REPO='"$(UPDATE_REPO)"'
 MINIZIP_FLAGS := -DNOUNCRYPT -I$(ROOT)/$(ZLIB_DIR) -w
@@ -135,6 +190,9 @@ PS5_EMU_OBJ := $(patsubst %.cpp,$(PS5_OUT)/port/%.o,$(EMU_SRC)) $(patsubst %.c,$
 PS5_MBEDTLS_OBJ := $(patsubst $(MBEDTLS)/library/%.c,$(PS5_OUT)/mbedtls/%.o,$(MBEDTLS_SRC))
 PS5_HELPER_OBJ := $(PS5_OUT)/port/installer/helper_main.o $(patsubst %.cpp,$(PS5_OUT)/port/%.o,$(HELPER_SRC)) $(PS5_MBEDTLS_OBJ)
 PS5_INSTALLER_OBJ := $(patsubst %.cpp,$(PS5_OUT)/port/%.o,$(INSTALLER_SRC)) $(PS5_MBEDTLS_OBJ)
+PS5_LIBSMB2_OBJ := $(patsubst $(LIBSMB2)/%.c,$(PS5_OUT)/libsmb2/%.o,$(LIBSMB2_SRC))
+PS5_LIBNFS_OBJ := $(patsubst $(LIBNFS)/%.c,$(PS5_OUT)/libnfs/%.o,$(LIBNFS_SRC))
+PS5_LZMA7Z_OBJ := $(patsubst $(LZMA7Z)/%.c,$(PS5_OUT)/lzma7z/%.o,$(LZMA7Z_SRC))
 
 ps5: $(PS5_OUT)/BeetlePCEPS5.elf
 # the core alone
@@ -157,9 +215,23 @@ $(PS5_OUT)/port/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(PS5_CC) $(PS5_OPT) $(MINIZIP_FLAGS) -c -o $@ $<
 
-$(PS5_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h
+$(PS5_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h
 	@mkdir -p $(dir $@)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
+
+$(PS5_OUT)/libsmb2/%.o: $(LIBSMB2)/%.c
+	@mkdir -p $(dir $@)
+	$(PS5_CC) -O2 -fPIC -march=znver2 $(LIBSMB2_FLAGS) -w -c -o $@ $<
+
+$(PS5_OUT)/libnfs/%.o: $(LIBNFS)/%.c
+	@mkdir -p $(dir $@)
+	$(PS5_CC) -O2 -fPIC -march=znver2 $(LIBNFS_FLAGS) -w -c -o $@ $<
+
+$(PS5_OUT)/lzma7z/%.o: $(LZMA7Z)/%.c $(wildcard $(LZMA7Z)/*.h)
+	@mkdir -p $(dir $@)
+	$(PS5_CC) $(PS5_OPT) $(LZMA7Z_FLAGS) -c -o $@ $<
+$(PS5_OUT)/lzma7z/names.ok: $(PS5_LZMA7Z_OBJ)
+	$(call LZMA7Z_NAMES_CHECK,$(PS5_PAYLOAD_SDK)/bin/llvm-nm,$^)
 
 $(PS5_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h
 	@mkdir -p $(dir $@)
@@ -255,13 +327,14 @@ build/app/app_crt.o build/app/app_cpp_runtime.o: build/app/%.o: $(NATIVE)/toolin
 	$(NATIVE_CLANG) -std=c++20 -O2 -Wall -Wextra -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections \
 		-c -o $@ $<
 
-EBOOT_OBJS = build/app/app_crt.o build/app/app_cpp_runtime.o $(PS5_CORE_OBJ) $(PS5_EMU_OBJ) $(PS5_OUT)/helper_data.o
+EBOOT_OBJS = build/app/app_crt.o build/app/app_cpp_runtime.o $(PS5_CORE_OBJ) $(PS5_EMU_OBJ) $(PS5_LIBSMB2_OBJ) $(PS5_LIBNFS_OBJ) \
+	$(PS5_LZMA7Z_OBJ) $(PS5_OUT)/helper_data.o
 build/app/pce-pie.elf: $(EBOOT_OBJS) $(NATIVE)/tooling/native/ps5-pie.ld $(NATIVE)/tooling/native/ehframe.ld \
-		$(NATIVE)/tooling/native/app-symbols.map $(NATIVE)/tooling/native/localize.map
+		$(NATIVE)/tooling/native/app-symbols.map $(NATIVE)/tooling/native/localize.map $(PS5_OUT)/lzma7z/names.ok
 	$(LLD) -m elf_x86_64 -pie -z max-page-size=0x4000 --hash-style=gnu \
 		-T $(NATIVE)/tooling/native/ps5-pie.ld -T $(NATIVE)/tooling/native/ehframe.ld --eh-frame-hdr \
 		--version-script $(NATIVE)/tooling/native/app-symbols.map --version-script $(NATIVE)/tooling/native/localize.map \
-		-e _start --no-dynamic-linker -o $@ $(EBOOT_OBJS) \
+		-e _start --no-dynamic-linker $(NETFS_WRAP_LLD) -o $@ $(EBOOT_OBJS) \
 		--as-needed $(APP_STUBS) -L $(SDK_LIB) \
 		$(SDK_LIB)/libc++.a $(SDK_LIB)/libc++abi.a $(SDK_LIB)/libunwind.a $(SDK_LIB)/libc.a -lpthread
 
@@ -297,15 +370,19 @@ HOST_OUT := build/host
 HOST_SAN ?= -fsanitize=address,undefined -fno-omit-frame-pointer
 # The core under AddressSanitizer only (UBSan would report its deliberate shifts and unaligned reads).
 HOST_CORE_SAN ?= -fsanitize=address -fno-omit-frame-pointer
-HOST_OPT := -O1 -g -mavx2 -fno-strict-aliasing
-HOST_CORE_OPT := -O2 -g1 -mavx2
+# no _FORTIFY_SOURCE: it turns fread/fgets/read into __fread_chk/..., which --wrap (netfs) does not see
+HOST_OPT := -O1 -g -mavx2 -fno-strict-aliasing -U_FORTIFY_SOURCE
+HOST_CORE_OPT := -O2 -g1 -mavx2 -U_FORTIFY_SOURCE
 
 HOST_CORE_OBJ := $(patsubst %.cpp,$(HOST_OUT)/core/%.o,$(CORE_SRC)) $(patsubst %.c,$(HOST_OUT)/core/%.o,$(CORE_C_SRC))
-HOST_EMU_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(EMU_SRC) host/sce_host.cpp) $(patsubst %.c,$(HOST_OUT)/port/%.o,$(EMU_C_SRC))
+HOST_EMU_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(EMU_SRC) host/sce_host.cpp host/netfs_dirbackend.cpp) $(patsubst %.c,$(HOST_OUT)/port/%.o,$(EMU_C_SRC))
 HOST_MBEDTLS_OBJ := $(patsubst $(MBEDTLS)/library/%.c,$(HOST_OUT)/mbedtls/%.o,$(MBEDTLS_SRC))
 HOST_HELPER_OBJ := $(HOST_OUT)/port/installer/helper_main.o $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(HELPER_SRC) host/sce_host.cpp) \
 	$(HOST_MBEDTLS_OBJ)
 HOST_INSTALLER_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(INSTALLER_SRC) host/sce_host.cpp) $(HOST_MBEDTLS_OBJ)
+HOST_LIBSMB2_OBJ := $(patsubst $(LIBSMB2)/%.c,$(HOST_OUT)/libsmb2/%.o,$(LIBSMB2_SRC))
+HOST_LIBNFS_OBJ := $(patsubst $(LIBNFS)/%.c,$(HOST_OUT)/libnfs/%.o,$(LIBNFS_SRC))
+HOST_LZMA7Z_OBJ := $(patsubst $(LZMA7Z)/%.c,$(HOST_OUT)/lzma7z/%.o,$(LZMA7Z_SRC))
 
 host-core: $(HOST_CORE_OBJ)
 host: $(HOST_OUT)/pce-ps5-host $(HOST_OUT)/pce-ps5-installer $(HOST_OUT)/pce-ps5-helper
@@ -326,9 +403,24 @@ $(HOST_OUT)/port/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_OPT) $(MINIZIP_FLAGS) -c -o $@ $<
 
-$(HOST_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h
+$(HOST_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
+
+$(HOST_OUT)/libsmb2/%.o: $(LIBSMB2)/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -O2 -g1 -D_GNU_SOURCE $(LIBSMB2_FLAGS) -w -c -o $@ $<
+
+$(HOST_OUT)/libnfs/%.o: $(LIBNFS)/%.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -O2 -g1 $(LIBNFS_FLAGS) -w -c -o $@ $<
+
+# the 7z decoder under AddressSanitizer too (it reads archives from anywhere; UBSan would report its unaligned reads)
+$(HOST_OUT)/lzma7z/%.o: $(LZMA7Z)/%.c $(wildcard $(LZMA7Z)/*.h)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -fPIC $(HOST_OPT) $(HOST_CORE_SAN) $(LZMA7Z_FLAGS) -c -o $@ $<
+$(HOST_OUT)/lzma7z/names.ok: $(HOST_LZMA7Z_OBJ)
+	$(call LZMA7Z_NAMES_CHECK,nm,$^)
 
 $(HOST_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h
 	@mkdir -p $(dir $@)
@@ -356,11 +448,74 @@ $(HOST_OUT)/pce-ps5-helper: $(HOST_HELPER_OBJ)
 $(HOST_OUT)/pce-ps5-installer: $(HOST_INSTALLER_OBJ) $(HOST_OUT)/install_data.o
 	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread
 
-$(HOST_OUT)/pce-ps5-host: $(HOST_CORE_OBJ) $(HOST_EMU_OBJ) $(HOST_OUT)/helper_data.o
-	$(HOST_CXX) $(HOST_SAN) -o $@ $^ -lpthread -lm
+$(HOST_OUT)/pce-ps5-host: $(HOST_CORE_OBJ) $(HOST_EMU_OBJ) $(HOST_LIBSMB2_OBJ) $(HOST_LIBNFS_OBJ) $(HOST_LZMA7Z_OBJ) $(HOST_OUT)/helper_data.o \
+		| $(HOST_OUT)/lzma7z/names.ok
+	$(HOST_CXX) $(HOST_SAN) -o $@ $^ $(NETFS_WRAP_GCC) -lpthread -lm
 
-test: host
+# netfs's own test: the netfs code, the stub backends and an in-memory share, linked with the same --wrap list
+HOST_NETFS_TEST_OBJ := $(patsubst %.cpp,$(HOST_OUT)/port/%.o,$(NETFS_CORE_SRC) netfs/backend_smb_stub.cpp netfs/backend_nfs_stub.cpp \
+	tests/test_netfs.cpp)
+# minizip and a whole static zlib (the build machine's libz.a: the core's zlib has no gz files) go into it too: the test
+# opens a .zip and a .gz on the fake share, through the --wrap list
+HOST_ZLIB_A ?= $(firstword $(wildcard /usr/lib/x86_64-linux-gnu/libz.a /usr/lib64/libz.a /usr/lib/libz.a))
+%/port/tests/test_netfs.o: EXTRA_FLAGS = -Inetfs -Ifrontend/third_party
+HOST_NETFS_TEST_EXTRA := $(HOST_OUT)/port/frontend/third_party/unzip.o $(HOST_OUT)/port/frontend/third_party/ioapi.o
+$(HOST_OUT)/test-netfs: $(HOST_NETFS_TEST_OBJ) $(HOST_NETFS_TEST_EXTRA) tests/netfs_fake.h
+	$(HOST_CXX) $(HOST_SAN) -o $@ $(HOST_NETFS_TEST_OBJ) $(HOST_NETFS_TEST_EXTRA) $(HOST_ZLIB_A) $(NETFS_WRAP_GCC) -lpthread
+
+test: host $(HOST_OUT)/test-netfs
 	bash tests/run-tests.sh
+
+# NFS backend unit test: backend_nfs.cpp against an in-memory libnfs (tests/libnfs_mock.cpp), no network
+NFS_TEST := $(HOST_OUT)/nfs-backend-test
+$(NFS_TEST): tests/nfs_backend_test.cpp tests/libnfs_mock.cpp tests/libnfs_mock.h netfs/backend_nfs.cpp netfs/backend_nfs.h netfs/netfs_backend.h
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -Itests -o $@ \
+		tests/nfs_backend_test.cpp tests/libnfs_mock.cpp netfs/backend_nfs.cpp -lpthread
+
+# the same backend on real libnfs (the objects of the host build), against loopback sockets that misbehave
+NFS_LOOP_TEST := $(HOST_OUT)/nfs-loopback-test
+$(NFS_LOOP_TEST): tests/nfs_loopback_test.cpp netfs/backend_nfs.cpp netfs/backend_nfs.h netfs/netfs_backend.h $(HOST_LIBNFS_OBJ)
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -o $@ \
+		tests/nfs_loopback_test.cpp netfs/backend_nfs.cpp $(HOST_LIBNFS_OBJ) -lpthread
+
+# the same backend against a real NFSv3 server (unfs3): not part of `make test`, needs rpcbind and unfsd
+NFS_SERVER_TEST := $(HOST_OUT)/nfs-server-test
+$(NFS_SERVER_TEST): tests/nfs_server_test.cpp netfs/backend_nfs.cpp netfs/backend_nfs.h netfs/netfs_backend.h $(HOST_LIBNFS_OBJ)
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) $(LIBNFS_FLAGS) -Inetfs -o $@ \
+		tests/nfs_server_test.cpp netfs/backend_nfs.cpp $(HOST_LIBNFS_OBJ) -lpthread
+
+test-nfs-server: $(NFS_SERVER_TEST)
+	bash tests/nfs_server_test.sh $(NFS_SERVER_TEST)
+
+test-nfs: $(NFS_TEST) $(NFS_LOOP_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(NFS_TEST)
+	ASAN_OPTIONS=detect_leaks=1 $(NFS_LOOP_TEST)
+
+# the shelf's storage tabs (frontend/fe_tabs.h): header only, so no app code is linked
+TABS_TEST := $(HOST_OUT)/tabs-test
+$(TABS_TEST): tests/test_tabs.cpp frontend/fe_tabs.h frontend/fe_games.h
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) -Ifrontend -o $@ tests/test_tabs.cpp
+
+test-tabs: $(TABS_TEST)
+	$(TABS_TEST)
+
+test: test-nfs test-tabs
+
+# 1.1: the 7z reader (fe_7z.cpp and the decoder) on the archives in tests/7z/ (tests/make_7z_fixtures.py made them)
+SEVENZIP_TEST := $(HOST_OUT)/test-7z
+$(SEVENZIP_TEST): tests/test_7z.cpp $(HOST_OUT)/port/frontend/fe_7z.o $(HOST_LZMA7Z_OBJ) | $(HOST_OUT)/lzma7z/names.ok
+	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(PORT_WARN) -Ifrontend -o $@ tests/test_7z.cpp \
+		$(HOST_OUT)/port/frontend/fe_7z.o $(HOST_LZMA7Z_OBJ) $(HOST_ZLIB_A) -lpthread
+
+test-7z: $(SEVENZIP_TEST)
+	python3 tests/make_test_rom.py $(HOST_OUT)/test-7z-card.pce >/dev/null
+	ASAN_OPTIONS=detect_leaks=1 $(SEVENZIP_TEST) tests/7z $(HOST_OUT)/test-7z-card.pce
+
+test: test-7z
 
 # ---------------- bench ----------------
 # The core alone, optimised as for the PS5 (-O3 -march=znver2), on a card: build/bench/pce-bench <card> [frames]
@@ -384,5 +539,8 @@ bench: $(BENCH_OUT)/pce-bench
 clean:
 	rm -rf build
 
-.PHONY: ps5 ps5-core host-core host test bench send strip app dist clean
+# the SMB backend against a real Samba (adds `smb-test`, run before the other tests; skipped without smbd)
+include tests/smb/smb.mk
+
+.PHONY: ps5 ps5-core host-core host test test-nfs test-nfs-server test-tabs test-7z bench send strip app dist clean
 .SECONDARY:

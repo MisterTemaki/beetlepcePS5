@@ -15,6 +15,8 @@ export PCEPS5_LOGS_DEFAULT=1
 CHECK="python3 $PWD/tests/check_ppm.py"
 RECT="python3 $PWD/tests/check_rect.py"
 ROM="python3 $PWD/tests/make_test_rom.py"
+CD="python3 $PWD/tests/make_test_cd.py"
+TONE="python3 $PWD/tests/check_tone.py"
 WORK=${WORK:-$(mktemp -d)}
 ONLY=${ONLY:-}
 PASS=0
@@ -22,8 +24,13 @@ FAIL=0
 
 # pad bits
 CROSS=4000; CIRCLE=2000; TRIANGLE=1000; UP=10; DOWN=40; RIGHT=20; L2=100; R2=200; L3R3=6; OPTIONS=8
+SQUARE=8000; L1=400; R1=800
 L2UP=$(printf %x $((0x$L2 | 0x$UP))); L2DOWN=$(printf %x $((0x$L2 | 0x$DOWN))); L2R2=$(printf %x $((0x$L2 | 0x$R2)))
 # pause menu: L3+R3, then Up from "Resume" wraps to "Quit Beetle PCE PS5"
+# the shelf: Options, then Cross on "Quit"
+SHELFQUIT_AT() { echo "$1:$OPTIONS;$(($1 + 2)):0;$(($1 + 10)):$CROSS;$(($1 + 12)):0"; }
+# buttons pressed one after the other from frame $1, 8 frames apart
+SEQ() { local f=$1 out="" b; shift; for b in "$@"; do out="$out;$f:$b;$((f + 2)):0"; f=$((f + 8)); done; echo "${out#;}"; }
 QUITAT() { echo "$1:$L3R3;$(($1 + 2)):0;$(($1 + 10)):$UP;$(($1 + 12)):0;$(($1 + 20)):$CROSS;$(($1 + 22)):0"; }
 
 ok() { echo "  ok: $*"; PASS=$((PASS + 1)); }
@@ -1040,6 +1047,51 @@ PY
 	expect "grep -q '^language=$L$' $T/root/pce-ps5.ini" "language $L: kept in the settings file"
 	nosan "$T"
 done
+# the network screens (1.1): Settings, Network shares with a share that does not connect, Add a share, the keyboard on
+# Server (Circle closes it), the share type switched to NFS, Circle asks to discard (Up, Cross: discard), Connect again;
+# back to the shelf: R1 to its Network tab (the share's state), Square scans again, L1 back, quit
+for L in 1 2 3 4; do
+	T=$(newroot t30net_$L)
+	echo "language=$L" >>"$T/root/pce-ps5.ini"
+	echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+	$ROM "$T/root/roms/Alpha (USA).pce" >/dev/null
+	key() { pad="$pad;$f:$1;$((f + 2)):0"; f=$((f + ${2:-6})); } # one press, then the next one $2 flips later
+	pad="0:0;20:$TRIANGLE;22:0"; f=30
+	for i in $(seq 1 5); do key $UP; done
+	key $CROSS 20; key $DOWN; key $CROSS 20; key $CROSS 20; key $CIRCLE 20
+	key $UP; key $RIGHT 20; key $CIRCLE 20; key $UP; key $CROSS 20
+	key $DOWN; key $CROSS 20; key $CIRCLE 20; key $CIRCLE 30
+	key $R1 30; key $SQUARE 60; key $L1 30
+	key $OPTIONS 10; key $CROSS 10
+	rm -f $T/missing.txt
+	rc=$(PCEPS5_HOST_REALTIME=1 PCEPS5_HOST_NETFS_DIR=$T/nothing PCEPS5_HOST_I18N_MISSING=$T/missing.txt run "$T" "$pad" "")
+	python3 - $T/missing.txt $PWD/frontend/fe_i18n.cpp > $T/untranslated.txt <<'PY'
+import os, re, sys
+src = open(sys.argv[2], encoding='utf-8').read()
+translated = set(re.findall(r'"((?:[^"\\]|\\.)*)"', src))
+spec = re.compile(r'%(?:%|[-+ #0]*\d*(?:\.\d+)?(?:hh|h|ll|l|z)?[diouxXeEfgGcsp])')
+formats = [re.compile('^' + ''.join('.*' if spec.fullmatch(part) else re.escape(part)
+                                    for part in re.split('(' + spec.pattern + ')', f)) + '$')
+           for f in translated if '%' in f]
+# (the first walk's names and rules, and the network screens' names)
+names = {'Alpha (USA)', 'I', 'II', 'Select', 'Run', 'L1', 'R1', 'OPTIONS', 'English', 'Español', 'Português (Brasil)',
+         'Français', 'Deutsch', 'RGB', 'PC Engine', 'SuperGrafx', 'PC Engine CD', 'HuC6280 (PC Engine)',
+         'SMB (Windows, Samba, NAS)', 'NFS', 'USB'}
+for line in (open(sys.argv[1], encoding='utf-8') if os.path.exists(sys.argv[1]) else []):
+    t = line.rstrip('\n')
+    if t in translated or t in names or not re.search('[A-Za-z]{2}', t) or re.fullmatch(r'[\d%. ]+', t):
+        continue
+    if any(f.match(t) for f in formats):
+        continue
+    if t.startswith('↣') or re.match(r'(PC Engine|PC Engine CD|SuperGrafx) {3}', t):
+        continue
+    if t.startswith('System Card ') or t.startswith('crt-'):
+        continue
+    print(t)
+PY
+	expect "[ $rc = 0 ] && grep -q 'network tab: scan again' $T/root/logs/boot.log && [ ! -s $T/untranslated.txt ]" "language $L: the network screens and the Network tab are translated ($(head -c 200 $T/untranslated.txt | tr '\n' '|'))"
+	nosan "$T"
+done
 # English stays the default: no setting, English on the screen (the texts pass through as they are)
 T=$(newroot t30en)
 $ROM "$T/root/roms/test.pce" >/dev/null
@@ -1051,6 +1103,388 @@ T=$(newroot t30row)
 $ROM "$T/root/roms/test.pce" >/dev/null
 rc=$(run "$T" "0:0;30:$TRIANGLE;32:0;50:$UP;52:0;56:$UP;58:0;62:$UP;64:0;68:$UP;70:0;76:$RIGHT;78:0;90:$CIRCLE;92:0;100:$OPTIONS;102:0;110:$CROSS;112:0" "")
 expect "[ $rc = 0 ] && grep -q '^language=1$' $T/root/pce-ps5.ini" "Settings, SYSTEM, Language: Right picks Español, saved as language=1"
+nosan "$T"
+fi
+
+# ---- network shares (1.1): netfs, games on a share, the Network shares screen, the shelf's storage tabs -------------
+# From Genesis Plus GX PS5 2.1.1's groups 39-43 (thatboialex's design in Snes9x PS5). The host build's share backend
+# (host/netfs_dirbackend.cpp) answers every smb:// and nfs:// address with the folder PCEPS5_HOST_NETFS_DIR names.
+
+if want 31; then
+echo "== 31. netfs: share addresses and redaction, routing, the libc --wrap layer, minizip and zlib on a share, the watchdog (in-memory share)"
+NETFS_OUT=$(ASAN_OPTIONS=detect_leaks=1 timeout 120 "$PWD/build/host/test-netfs" 2>&1)
+NETFS_RC=$?
+echo "$NETFS_OUT" | tail -3 | sed 's/^/  /'
+expect "[ $NETFS_RC = 0 ]" "netfs: every check passes"
+expect "! echo \"\$NETFS_OUT\" | grep -q 'runtime error\|Sanitizer'" "no sanitizer reports"
+fi
+
+if want 32; then
+echo "== 32. games on a share: on the shelf, a HuCard started from it, CD games (cue/bin, chd) whose music streams from it while they run"
+# a. a HuCard on an SMB share: listed, started from the shelf (read whole), its save state on the console
+T=$(newroot t32)
+mkdir -p "$T/share/PCEngine"
+$ROM "$T/share/PCEngine/Net Game (USA).pce" >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(PCEPS5_HOST_REALTIME=1 MAXFLIPS=900 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;150:$CROSS;152:0;280:$CROSS;320:0;340:$L2UP;345:0;$(QUITAT 400)" "300")
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "grep -q '\[net\] 1 share(s) in shares.txt' $T/root/logs/boot.log" "shares.txt was read"
+expect "grep -q '\[net\] Connected to smb://10.0.0.5/games' $T/root/logs/boot.log" "the share connected"
+expect "grep -q 'loading /smb/10.0.0.5/games/PCEngine/Net Game (USA).pce' $T/root/logs/boot.log && grep -q 'running \"Net Game (USA)\" (PC Engine)' $T/root/logs/boot.log" "the game was started from the share"
+expect "$CHECK $T/dump/flip00300.ppm 960 540 green >/dev/null" "it runs (Cross -> green)"
+expect "[ -f '$T/root/states/PCEngine/Net Game (USA).state1' ] && [ ! -e '$T/share/states' ] && [ \$(find $T/share -type f | wc -l) = 1 ]" "its state is on the console, nothing is written to the share"
+expect "grep -q 'last_rom=/smb/10.0.0.5/games/PCEngine/Net Game (USA).pce' $T/root/pce-ps5.ini" "the shelf remembers it"
+nosan "$T"
+# b. CD games on an NFS share, the System Card on the console. The stand-in card (make_test_rom.py cdplay) plays the
+# disc's track 2 in a loop: the core reads the disc through netfs while the game runs (netfs's blocks and read-ahead),
+# and the tones come out in tune (check_tone.py)
+for kind in cue chd; do
+	T=$(newroot t32$kind)
+	mkdir -p "$T/root/bios" "$T/share/PCEngineCD"
+	$ROM "$T/root/bios/syscard3.pce" cdplay >/dev/null
+	$CD "$T/share/PCEngineCD/Tone (USA).$kind" >/dev/null
+	echo "nfs://10.0.0.5/export/pce" >"$T/root/shares.txt"
+	rc=$(PCEPS5_HOST_AUDIO_DUMP=$T/audio.raw PCEPS5_HOST_REALTIME=1 MAXFLIPS=900 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;150:$CROSS;152:0;300:$CROSS;340:0;$(QUITAT 400)" "290,330")
+	expect "[ $rc = 0 ] && grep -q 'loading /nfs/10.0.0.5/export/pce/PCEngineCD/Tone (USA).$kind, System Card syscard3.pce' $T/root/logs/boot.log && grep -q 'running \"Tone (USA)\" (PC Engine CD)' $T/root/logs/boot.log" "$kind on a share: the disc starts as a PC Engine CD game"
+	expect "$CHECK $T/dump/flip00290.ppm 960 540 red >/dev/null && $CHECK $T/dump/flip00330.ppm 960 540 green >/dev/null" "$kind on a share: the System Card runs (red), the pad reaches it (green)"
+	expect "$TONE $T/audio.raw >$T/tone.txt" "$kind on a share: the disc's music, read from the share while the game runs: 1000 Hz left, 1500 Hz right, in tune and clean"
+	sed 's/^/    /' $T/tone.txt
+	nosan "$T"
+done
+# the same with 200 ms on every read, as a slow link: the game waits for the block it seeks to (logged), then plays on
+T=$(newroot t32slow)
+mkdir -p "$T/root/bios" "$T/share"
+$ROM "$T/root/bios/syscard3.pce" cdplay >/dev/null
+$CD "$T/share/Tone.cue" >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(PCEPS5_HOST_NETFS_DELAY_MS=200 PCEPS5_HOST_AUDIO_DUMP=$T/audio.raw PCEPS5_HOST_REALTIME=1 MAXFLIPS=1100 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;150:$CROSS;152:0;$(QUITAT 700)" "")
+expect "[ $rc = 0 ] && grep -q 'running \"Tone\" (PC Engine CD)' $T/root/logs/boot.log" "a slow link: the disc still starts"
+expect "grep -q 'smb://10.0.0.5/games: waited for Tone.bin in realtime (#1)' $T/root/logs/boot.log" "a slow link: the wait for the disc is logged"
+expect "$TONE $T/audio.raw >$T/tone.txt" "and the track still plays at its pitch (after a gap while it waited)"
+sed 's/^/    /' $T/tone.txt
+nosan "$T"
+# c. a share that does not connect: the shelf still works and says why
+T=$(newroot t32f)
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(PCEPS5_HOST_REALTIME=1 PCEPS5_HOST_NETFS_DIR="$T/nothing" run "$T" "0:0;100:$OPTIONS;102:0;110:$CROSS;112:0" "")
+expect "[ $rc = 0 ] && grep -q '\[games\] 0 ROM(s)' $T/root/logs/boot.log" "a share that does not connect leaves the shelf working"
+expect "grep -q '\[net\] The folder games is not on 10.0.0.5' $T/root/logs/boot.log" "and says why"
+nosan "$T"
+# d. shares.txt: written with its comments when missing; a bad line is named in the log, never its text
+T=$(newroot t32n)
+rc=$(run "$T" "0:0;$(SHELFQUIT_AT 40)" "")
+expect "[ $rc = 0 ] && grep -q '^# Beetle PCE PS5 network shares' $T/root/shares.txt && ! grep -q '^smb://\|^nfs://' $T/root/shares.txt" "a commented shares.txt is written when there is none"
+printf 'smb://bob@10.0.0.5/games?password=Hunter2x\nftp://10.0.0.5/x?password=Hunter2y\n' >"$T/root/shares.txt"
+rc=$(PCEPS5_HOST_NETFS_DIR="$T/nothing" run "$T" "0:0;$(SHELFQUIT_AT 40)" "")
+expect "[ $rc = 0 ] && grep -q 'shares.txt line 2: ' $T/root/logs/boot.log" "a line that is not an address is named by its number"
+expect "! grep -rq 'Hunter2' $T/root/logs $T/out.txt" "no password in a log or on stdout"
+nosan "$T"
+fi
+
+if want 33; then
+echo "== 33. a game on a share with a made-up file name is named by its CRC in the background, its cover follows; a zip's system too"
+T=$(newroot t33)
+PCEREPO=NEC_-_PC_Engine_-_TurboGrafx_16
+mkdir -p "$T/srv/$PCEREPO/Named_Boxarts" "$T/share/misc"
+python3 - "$T/srv/$PCEREPO/Named_Boxarts" <<'PY'
+import sys
+from PIL import Image
+Image.new('RGB', (512, 357), (0, 255, 0)).save(sys.argv[1] + '/Splatterhouse (Japan).png')
+open(sys.argv[1] + '/Splatterhouse (USA).png', 'w').write('Splatterhouse (Japan).png')
+PY
+$ROM "$T/share/splat.pce" >/dev/null
+python3 tests/forge_crc.py "$T/share/splat.pce" $(grep -P "^pce\t[0-9A-F]{8}\tSplatterhouse \(USA\)$" frontend/data/nointro.tsv | cut -f2) >/dev/null
+# a SuperGrafx card in a zip, in a folder whose name says nothing: listed as a PC Engine game until its zip is read
+$ROM "$T/sgx.sgx" >/dev/null
+python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w'); z.write(sys.argv[2],'Super.sgx'); z.close()" "$T/share/misc/super.zip" "$T/sgx.sgx"
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+PORT=18082
+(cd "$T/srv" && exec python3 -m http.server $PORT --bind 127.0.0.1 >/dev/null 2>&1) &
+SRVPID=$!
+sleep 1
+rc=$(OFFLINE= COVER_URL="http://127.0.0.1:$PORT/\${repo}/Named_Boxarts/\${name}.png" PCEPS5_HOST_REALTIME=1 MAXFLIPS=420 PCEPS5_HOST_NETFS_DIR="$T/share" \
+	run "$T" "0:0" "400")
+kill $SRVPID 2>/dev/null
+expect "grep -q '\[games\] naming 2 network ROM(s) by CRC' $T/root/logs/boot.log" "the pass was started for the two games the scan did not read"
+expect "grep -q 'splat.pce \[pce\] -> \"Splatterhouse (USA)\" (by CRC)' $T/root/logs/boot.log" "the next scan names the HuCard by its CRC"
+expect "grep -q 'misc/super.zip \[pce\]' $T/root/logs/boot.log && grep -q 'misc/super.zip \[sgx\]' $T/root/logs/boot.log" "the zip moves to the SuperGrafx once its directory was read"
+expect "grep -q '/smb/10.0.0.5/games/splat.pce' $T/root/covers/crc-cache.txt && grep -q '^sys:/smb/10.0.0.5/games/misc/super.zip' $T/root/covers/crc-cache.txt" "both are kept for the next start"
+expect "[ -f '$T/root/covers/PCEngine/Splatterhouse (USA).png' ]" "the cover of the game named late was downloaded"
+nosan "$T"
+# the next start reads nothing over the network: the cache names both
+rc=$(PCEPS5_HOST_REALTIME=1 MAXFLIPS=200 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0" "")
+expect "[ \$(grep -c 'splat.pce \[pce\] -> \"Splatterhouse (USA)\" (by CRC)' $T/root/logs/boot.log) -ge 1 ] && grep -q 'misc/super.zip \[sgx\]' $T/root/logs/boot.log && ! grep -q 'naming .* network ROM' $T/root/logs/boot.log" "the next start: named from the cache, no pass needed"
+nosan "$T"
+# a read error while the share stays connected (a link that drops, the watchdog, the shares connected again) is not the file's
+# fault: nothing is remembered, the zip stays on the shelf, and the next start reads both again. A .cue sheet's track list is
+# cached (a scan again doesn't read every sheet of the share once more): its track stays off the shelf when the sheet can't be read.
+T=$(newroot t33e)
+mkdir -p "$T/share/misc" "$T/share/PCEngineCD"
+$ROM "$T/share/splat.pce" >/dev/null
+python3 tests/forge_crc.py "$T/share/splat.pce" $(grep -P "^pce\t[0-9A-F]{8}\tSplatterhouse \(USA\)$" frontend/data/nointro.tsv | cut -f2) >/dev/null
+$ROM "$T/sgx.sgx" >/dev/null
+python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w'); z.write(sys.argv[2],'Super.sgx'); z.close()" "$T/share/misc/super.zip" "$T/sgx.sgx"
+printf 'FILE "Disc (Track 01).bin" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n' >"$T/share/PCEngineCD/Disc (USA).cue"
+head -c 4096 /dev/zero >"$T/share/PCEngineCD/Disc (Track 01).bin"
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(PCEPS5_HOST_NETFS_EIO=splat.pce,super.zip PCEPS5_HOST_REALTIME=1 MAXFLIPS=400 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0" "")
+expect "grep -q 'network CRC pass: 2 ROM(s) read\$' $T/root/logs/boot.log" "read errors: the pass tried both"
+expect "! grep -q 'splat.pce.*fail' $T/root/covers/crc-cache.txt && ! grep -q '^sys:.*super.zip' $T/root/covers/crc-cache.txt" "and remembered no failure"
+expect "[ \$(grep -c 'misc/super.zip \[pce\]' $T/root/logs/boot.log) -ge 2 ]" "the zip is still on the shelf after the pass"
+expect "grep -q '^cue:/smb/10.0.0.5/games/PCEngineCD/Disc (USA).cue' $T/root/covers/crc-cache.txt && grep -q 'PCEngineCD/Disc (USA).cue \[pcecd\]' $T/root/logs/boot.log && ! grep -q 'Track 01).bin \[' $T/root/logs/boot.log" "the sheet's track list is cached, its track is not a game"
+nosan "$T"
+rc=$(PCEPS5_HOST_NETFS_EIO=.cue PCEPS5_HOST_REALTIME=1 MAXFLIPS=400 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0" "")
+expect "grep -q 'splat.pce \[pce\] -> \"Splatterhouse (USA)\" (by CRC)' $T/root/logs/boot.log && grep -q 'misc/super.zip \[sgx\]' $T/root/logs/boot.log" "the next start reads both again and names them"
+expect "grep -q 'PCEngineCD/Disc (USA).cue \[pcecd\]' $T/root/logs/boot.log && ! grep -q 'Track 01).bin \[' $T/root/logs/boot.log" "the sheet is not read again (it can't be now): its track is still not a game"
+nosan "$T"
+# Settings (Triangle) while the pass reads a ROM (3 s a read): the pass stops first (Settings > Network shares may connect the shares
+# again, which needs no other netfs call running); the ROM it was reading is read again once Settings is left
+T=$(newroot t33s)
+mkdir -p "$T/share"
+$ROM "$T/share/splat.pce" >/dev/null
+python3 tests/forge_crc.py "$T/share/splat.pce" $(grep -P "^pce\t[0-9A-F]{8}\tSplatterhouse \(USA\)$" frontend/data/nointro.tsv | cut -f2) >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(PCEPS5_HOST_NETFS_DELAY_MS=3000 PCEPS5_HOST_REALTIME=1 MAXFLIPS=900 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;60:$TRIANGLE;62:0;90:$CIRCLE;92:0" "")
+expect "grep -q 'network CRC pass: 0 ROM(s) read (stopped)' $T/root/logs/boot.log" "Settings stops the pass while it reads"
+expect "grep -q 'splat.pce \[pce\] -> \"Splatterhouse (USA)\" (by CRC)' $T/root/logs/boot.log" "and, once Settings is left, the ROM it was reading is read again and named"
+nosan "$T"
+fi
+
+if want 34; then
+echo "== 34. the Network shares screen: add, change, test and remove a share with the on-screen keyboard (Settings, Network shares)"
+# tests/osk_pad.py turns the steps into a pad script (the keyboard's layout is its model). Settings is Triangle on the shelf; Up five
+# times from Shader reaches Network shares (Back, Updates, Debug logs, Language, Network shares). Every run ends: Circle twice,
+# OPTIONS, Cross.
+net_pad() { python3 tests/osk_pad.py 2>/dev/null; }
+net_quit='press CIRCLE 2
+press OPTIONS
+wait 8
+press CROSS'
+# a. a new share: server, share, folder with a space, user, a password that needs Shift and both kinds of symbols
+T=$(newroot t34)
+mkdir -p "$T/share"
+PAD=$(net_pad <<STEPS
+frame 40
+press TRIANGLE
+press UP 5
+press CROSS
+press CROSS
+field 10.0.0.5
+press DOWN
+field games
+press DOWN
+field PC Engine
+press DOWN
+field jason
+press DOWN
+field Zq9@pw&1
+press DOWN 6
+press CROSS
+wait 20
+$net_quit
+STEPS
+)
+rc=$(PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "$PAD" "")
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "[ \"\$(tail -n 1 $T/root/shares.txt)\" = 'smb://jason@10.0.0.5/games/PC%20Engine?password=Zq9%40pw%261' ]" "the share is written as one escaped line"
+expect "grep -q '^# Beetle PCE PS5 network shares' $T/root/shares.txt" "after the comments the app wrote"
+expect "grep -q '\[net\] shares.txt: saved smb://jason@10.0.0.5/games/PC%20Engine' $T/root/logs/boot.log" "the log says what was saved"
+expect "grep -q '\[net\] Connected to smb://jason@10.0.0.5/games/PC%20Engine' $T/root/logs/boot.log" "and the share connects at once, without a restart"
+expect "! grep -rqE 'Zq9|pw%26' $T/root/logs $T/out.txt" "the password is in no log and not on stdout"
+nosan "$T"
+# b. change one share (its note stays), test the connection, remove the other
+T=$(newroot t34b)
+mkdir -p "$T/share/Sub" && echo x >"$T/share/a.pce"
+printf '# my shares\nsmb://old/x   # my note\nnfs://nas/export/pce\n' >"$T/root/shares.txt"
+PAD=$(net_pad <<STEPS
+frame 40
+press TRIANGLE
+press UP 5
+press CROSS
+press CROSS
+press DOWN 3
+field bob
+press DOWN 6
+press CROSS
+wait 120
+press DOWN
+press CROSS
+wait 20
+press DOWN
+press CROSS
+press DOWN 7
+press CROSS
+wait 8
+press UP
+press CROSS
+wait 20
+$net_quit
+STEPS
+)
+rc=$(PCEPS5_HOST_REALTIME=1 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "$PAD" "")
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "[ \"\$(cat $T/root/shares.txt)\" = \"\$(printf '# my shares\nsmb://bob@old/x   # my note')\" ]" "one line changed (note kept), the other was removed, the comment stays"
+expect "grep -q '\[net\] test of smb://bob@old/x: Connected. The folder has 1 file and 1 folder.' $T/root/logs/boot.log" "Test connection reports what is in the folder"
+expect "grep -q '\[net\] shares.txt: removed nfs://nas/export/pce' $T/root/logs/boot.log" "the removal is logged"
+nosan "$T"
+# c. Save with nothing filled in changes nothing
+T=$(newroot t34c)
+PAD=$(net_pad <<STEPS
+frame 40
+press TRIANGLE
+press UP 5
+press CROSS
+press CROSS
+press DOWN 10
+press CROSS
+wait 8
+press CIRCLE
+$net_quit
+STEPS
+)
+rc=$(run "$T" "$PAD" "")
+expect "[ $rc = 0 ] && ! grep -q '^smb://\|^nfs://' $T/root/shares.txt" "an empty form is not saved (and Circle on a form with no changes leaves it at once)"
+nosan "$T"
+# d. over a game (Settings from the pause menu) the row is there but can't be chosen (the game may be reading from a share):
+# the pause menu: Down four times to Settings; there, Up five times from Shader passes Network shares and lands on
+# Download covers, which Cross switches off; Circle, then Up five times to Quit
+T=$(newroot t34d)
+$ROM "$T/root/roms/test.pce" >/dev/null
+rc=$(MAXFLIPS=900 run "$T" "0:0;$(SEQ 100 $L3R3 $DOWN $DOWN $DOWN $DOWN $CROSS $UP $UP $UP $UP $UP $CROSS $CIRCLE $UP $UP $UP $UP $UP $CROSS)" "" "$T/root/roms/test.pce")
+expect "[ $rc = 0 ] && grep -q '^covers_download=0' $T/root/pce-ps5.ini" "over a game: Network shares is skipped (Up five times reaches Download covers)"
+nosan "$T"
+fi
+
+if want 35; then
+echo "== 35. shelf tabs: Internal and Network apart, L1 / R1 between them, the last tab kept, Square on Network scans again; L2 / R2 skip 10"
+# The tab bar sits at the top: the open tab's pill is the accent colour (78,62,170), the other one dark (32,30,58); (795,30) is
+# inside the Internal pill and (1120,30) inside the Network pill (above their names). The share connects within a few seconds of wall time.
+tab_pills() { # dump the active tab: Internal | Network
+	local f=$1 on=$2
+	if [ "$on" = Internal ]; then
+		$CHECK "$f" 795 30 78 62 170 >/dev/null && $CHECK "$f" 1120 30 32 30 58 >/dev/null
+	else
+		$CHECK "$f" 795 30 32 30 58 >/dev/null && $CHECK "$f" 1120 30 78 62 170 >/dev/null
+	fi
+}
+T=$(newroot t35)
+mkdir -p "$T/share"
+$ROM "$T/root/roms/Local Game (USA).pce" >/dev/null
+$ROM "$T/share/Net Game (USA).pce" >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(PCEPS5_HOST_REALTIME=1 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;220:$R1;222:0;300:$SQUARE;302:0;380:$L1;382:0;420:$OPTIONS;422:0;430:$CROSS;432:0" "200,260,400")
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "tab_pills $T/dump/flip00200.ppm Internal" "the shelf opens on the Internal tab"
+expect "tab_pills $T/dump/flip00260.ppm Network" "R1 goes to the Network tab"
+expect "tab_pills $T/dump/flip00400.ppm Internal" "L1 comes back"
+expect "grep -q '\[shelf\] tab Network: 1 game' $T/root/logs/boot.log" "the Network tab holds the game on the share"
+expect "grep -q '\[shelf\] tab Internal: 1 game' $T/root/logs/boot.log" "and the Internal tab only the local one"
+expect "grep -q '\[shelf\] network tab: scan again\$' $T/root/logs/boot.log" "Square on the Network tab scans again"
+expect "[ \$(grep -c '\[games\] 2 ROM' $T/root/logs/boot.log) -ge 2 ]" "and the scan found both games again"
+expect "awk '/network tab: scan again/{f=1;next} f&&/\[covers\]/{c++} f&&/\[shelf\] tab /{exit} END{exit !(f && c == 0)}' $T/root/logs/boot.log" "the same games after the scan: the covers are not loaded again"
+expect "grep -q 'last_tab=0' $T/root/pce-ps5.ini" "the tab left on is kept (Internal)"
+nosan "$T"
+T=$(newroot t35b)
+mkdir -p "$T/share"
+$ROM "$T/root/roms/Local Game (USA).pce" >/dev/null
+$ROM "$T/share/Net Game (USA).pce" >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+echo "last_tab=2" >>"$T/root/pce-ps5.ini"
+rc=$(PCEPS5_HOST_REALTIME=1 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;300:$OPTIONS;302:0;310:$CROSS;312:0" "40,250")
+expect "[ $rc = 0 ] && tab_pills $T/dump/flip00040.ppm Network" "with last_tab=2 and a share set up the shelf opens on Network, before the share is up"
+expect "tab_pills $T/dump/flip00250.ppm Network" "and stays there when its games arrive"
+expect "grep -q 'last_tab=2' $T/root/pce-ps5.ini" "and keeps the tab on quit"
+T=$(newroot t35c)
+$ROM "$T/root/roms/Local Game (USA).pce" >/dev/null
+echo "last_tab=2" >>"$T/root/pce-ps5.ini"
+rc=$(run "$T" "0:0;60:$R1;62:0;70:$SQUARE;72:0;90:$L1;92:0;120:$OPTIONS;122:0;130:$CROSS;132:0" "40,80,110")
+expect "[ $rc = 0 ] && tab_pills $T/dump/flip00040.ppm Internal" "last_tab=2 without a share set up opens on the games instead"
+expect "tab_pills $T/dump/flip00080.ppm Network && grep -q '\[shelf\] tab Network: 0 game' $T/root/logs/boot.log" "R1 shows the empty Network tab"
+expect "grep -q '\[shelf\] network tab: scan again\$' $T/root/logs/boot.log" "Square on it scans again, with no share to ask"
+expect "tab_pills $T/dump/flip00110.ppm Internal && grep -q 'last_tab=0' $T/root/pce-ps5.ini" "L1 goes back and the tab is kept"
+nosan "$T"
+T=$(newroot t35d)
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(PCEPS5_HOST_REALTIME=1 PCEPS5_HOST_NETFS_DIR="$T/nothing" run "$T" "0:0;150:$SQUARE;152:0;330:$OPTIONS;332:0;340:$CROSS;342:0" "100")
+expect "[ $rc = 0 ] && tab_pills $T/dump/flip00100.ppm Network" "a share that is down leaves a shelf with no games on the Network tab"
+expect "grep -q '\[shelf\] network tab: scan again, reconnecting' $T/root/logs/boot.log" "Square connects it again"
+expect "[ \$(grep -c 'The folder games is not on 10.0.0.5' $T/root/logs/boot.log) -ge 2 ]" "and says why each time"
+nosan "$T"
+# the system tabs (Up / Down) work inside the storage tab; L2 / R2 skip 10 games (L1 / R1 did before 1.1)
+T=$(newroot t35e)
+mkdir -p "$T/share"
+for i in $(seq -w 1 12); do $ROM "$T/root/roms/Game $i (USA).pce" >/dev/null; done
+$ROM "$T/root/roms/Super (Japan).sgx" >/dev/null
+$ROM "$T/share/Net Super (Japan).sgx" >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+# (back to the shelf from a game: the pause menu, Up twice, Cross)
+rc=$(PCEPS5_HOST_REALTIME=1 MAXFLIPS=900 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;150:$R2;152:0;170:$CROSS;172:0;$(SEQ 230 $L3R3 $UP $UP $CROSS);320:$R1;322:0;340:$DOWN;342:0;380:$CROSS;382:0;$(QUITAT 480)" "")
+expect "[ $rc = 0 ] && grep -q 'loading .*/Game 11 (USA).pce' $T/root/logs/boot.log" "R2 skips 10 games (Game 01 -> Game 11)"
+expect "grep -q '\[shelf\] tab SuperGrafx: 1 game' $T/root/logs/boot.log && grep -q 'loading /smb/10.0.0.5/games/Net Super (Japan).sgx' $T/root/logs/boot.log" "on the Network tab, Down shows its SuperGrafx game, which runs"
+nosan "$T"
+fi
+
+# ---- 7-Zip (1.1): HuCards inside a .7z (frontend/fe_7z.cpp, the LZMA SDK's C decoder); the archives are tests/7z/ ------
+if want 36; then
+echo "== 36. 7z: the reader on every kind of archive; a .7z on the shelf named and covered as its .zip twin, started, run; what is refused, and why; a .7z on a share"
+SZ_OUT=$(ASAN_OPTIONS=detect_leaks=1 timeout 120 "$PWD/build/host/test-7z" "$PWD/tests/7z" "$PWD/build/host/test-7z-card.pce" 2>&1)
+SZ_RC=$?
+echo "$SZ_OUT" | tail -3 | sed 's/^/  /'
+expect "[ $SZ_RC = 0 ]" "the 7z reader: LZMA, LZMA2, PPMd, BCJ, Delta, a solid block, the directory's CRCs; empty, truncated, corrupt, BZip2, AES, too big: every check passes"
+expect "! echo \"\$SZ_OUT\" | grep -q 'runtime error\|Sanitizer'" "no sanitizer reports"
+# a. the same card as a .7z and as a .zip: both named by the CRC their directory keeps, one cover for both; the .7z runs
+T=$(newroot t36)
+PCEREPO=NEC_-_PC_Engine_-_TurboGrafx_16
+mkdir -p "$T/srv/$PCEREPO/Named_Boxarts" "$T/root/roms/PCEngine"
+python3 -c "from PIL import Image; import sys; Image.new('RGB', (512, 357), (0, 255, 0)).save(sys.argv[1])" "$T/srv/$PCEREPO/Named_Boxarts/Splatterhouse (USA).png"
+cp tests/7z/named.7z "$T/root/roms/PCEngine/seven.7z"
+$ROM "$T/splat.pce" >/dev/null
+python3 tests/forge_crc.py "$T/splat.pce" $(grep -P "^pce\t[0-9A-F]{8}\tSplatterhouse \(USA\)$" frontend/data/nointro.tsv | cut -f2) >/dev/null
+python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED); z.write(sys.argv[2],'splat.pce'); z.close()" "$T/root/roms/PCEngine/zipped.zip" "$T/splat.pce"
+PORT=18083
+(cd "$T/srv" && exec python3 -m http.server $PORT --bind 127.0.0.1 >/dev/null 2>&1) &
+SRVPID=$!
+sleep 1
+# the shelf: the two games (same title: by path, seven.7z first); the 7z is selected, Cross starts it
+rc=$(OFFLINE= COVER_URL="http://127.0.0.1:$PORT/\${repo}/Named_Boxarts/\${name}.png" PCEPS5_HOST_REALTIME=1 MAXFLIPS=900 run "$T" \
+	"0:0;150:$CROSS;152:0;280:$CROSS;320:0;$(QUITAT 400)" "140,300")
+kill $SRVPID 2>/dev/null
+expect "[ $rc = 0 ]" "exit code 0 (got $rc)"
+expect "grep -q 'PCEngine/seven.7z \[pce\] -> \"Splatterhouse (USA)\" (by CRC)' $T/root/logs/boot.log && grep -q 'PCEngine/zipped.zip \[pce\] -> \"Splatterhouse (USA)\" (by CRC)' $T/root/logs/boot.log" "the .7z is named by its CRC, as its .zip twin"
+expect "[ -f '$T/root/covers/PCEngine/Splatterhouse (USA).png' ] && $CHECK $T/dump/flip00140.ppm 960 420 0 255 0 >/dev/null" "and shows the cover the .zip gets"
+expect "grep -q 'loading .*seven.7z -> splat.pce' $T/root/logs/boot.log && grep -q 'running \"seven\" (PC Engine)' $T/root/logs/boot.log" "the card inside the .7z is loaded"
+expect "$CHECK $T/dump/flip00300.ppm 960 540 green >/dev/null" "and runs as the .zip's does (Cross -> green)"
+expect "grep -q '^sys:.*seven.7z' $T/root/covers/crc-cache.txt" "the .7z's system is cached as a zip's"
+nosan "$T"
+# b. a SuperGrafx card after a text file in the archive: its system from the card inside; started as SuperGrafx
+T=$(newroot t36b)
+cp tests/7z/sgx.7z "$T/root/roms/super.7z"
+rc=$(run "$T" "0:0;100:$CROSS;140:0;$(QUITAT 200)" "90,130" "$T/root/roms/super.7z")
+expect "[ $rc = 0 ] && grep -q 'loading .*super.7z -> Super (Japan).sgx' $T/root/logs/boot.log && grep -q 'running \"super\" (SuperGrafx)' $T/root/logs/boot.log" "a .sgx in a .7z starts as a SuperGrafx game"
+expect "$CHECK $T/dump/flip00090.ppm 960 540 red >/dev/null && $CHECK $T/dump/flip00130.ppm 960 540 green >/dev/null" "it runs"
+nosan "$T"
+# c. what the shelf leaves out (a CD image, no game, a broken directory) and what says why it can't start
+T=$(newroot t36c)
+for f in disc nogame empty truncated bzip2 aes aeshdr big corrupt lzma; do cp tests/7z/$f.7z "$T/root/roms/$f.7z"; done
+rc=$(run "$T" "0:0;$(SHELFQUIT_AT 60)" "")
+expect "[ $rc = 0 ] && grep -q '\[games\] 5 ROM(s)' $T/root/logs/boot.log" "the shelf lists the five archives with a HuCard in a readable directory"
+expect "! grep -q 'disc.7z \[\|nogame.7z \[\|empty.7z \[\|truncated.7z \[\|aeshdr.7z \[' $T/root/logs/boot.log" "a CD image in a .7z, an archive with no HuCard, a cut or name-encrypted one: not listed"
+nosan "$T"
+for f in bzip2:"can't unpack" aes:"is encrypted" big:"too big" corrupt:"damaged"; do
+	n=${f%%:*}; why=${f#*:}
+	rc=$(MAXFLIPS=300 run "$T" "0:0;60:$CROSS;62:0" "50" "$T/root/roms/$n.7z")
+	expect "grep -q \"could not start .*$n.7z: .*$why\" $T/root/logs/boot.log && [ -f $T/dump/flip00050.ppm ]" "$n.7z: not started; the screen says why ($why)"
+	nosan "$T"
+done
+# d. a .7z on a share: listed before it is opened (its folder's name), named by its CRC in the background, started from the share
+T=$(newroot t36d)
+mkdir -p "$T/share/PCEngine"
+cp tests/7z/named.7z "$T/share/PCEngine/seven.7z"
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(PCEPS5_HOST_REALTIME=1 MAXFLIPS=900 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;300:$CROSS;302:0;430:$CROSS;470:0;$(QUITAT 520)" "450")
+expect "[ $rc = 0 ] && grep -q '\[games\] naming 1 network ROM(s) by CRC' $T/root/logs/boot.log" "the .7z on the share is named in the background (the scan doesn't open it)"
+expect "grep -q 'PCEngine/seven.7z \[pce\] -> \"Splatterhouse (USA)\" (by CRC)' $T/root/logs/boot.log" "by the CRC its directory keeps"
+expect "grep -q 'loading /smb/10.0.0.5/games/PCEngine/seven.7z -> splat.pce' $T/root/logs/boot.log && $CHECK $T/dump/flip00450.ppm 960 540 green >/dev/null" "it starts from the share and runs"
 nosan "$T"
 fi
 

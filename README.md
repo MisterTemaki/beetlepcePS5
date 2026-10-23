@@ -8,8 +8,8 @@ icon and background. One app plays the whole family:
 
 | System | Files | Needs (in `/data/pce/bios/`) |
 |---|---|---|
-| PC Engine / TurboGrafx-16 / CoreGrafx HuCards | `.pce` (also inside a `.zip`) | nothing |
-| SuperGrafx | `.sgx` (or `.pce`: a SuperGrafx game the game list knows starts as one) | nothing |
+| PC Engine / TurboGrafx-16 / CoreGrafx HuCards | `.pce` (also inside a `.zip` or a `.7z`) | nothing |
+| SuperGrafx | `.sgx` (or `.pce`: a SuperGrafx game the game list knows starts as one; also inside a `.zip` or a `.7z`) | nothing |
 | CD-ROM² / TurboGrafx-CD | `.cue` (+ its tracks), `.chd`, `.ccd`, `.toc`, `.m3u` | a System Card: `syscard3.pce` (best), `syscard2.pce` or `syscard1.pce` |
 | Super CD-ROM² | the same | `syscard3.pce` (System Card 3.0) |
 | Arcade CD-ROM² (Arcade Card) | the same | `syscard3.pce`; the Arcade Card itself is emulated (on by default) |
@@ -18,7 +18,8 @@ icon and background. One app plays the whole family:
 TurboGrafx-16 HuCards dumped with their data lines reversed (every byte's bits in the opposite order) are found and
 put right when they start. CD games started without a System Card say on the screen which file is needed and where
 it goes. The tracks a `.cue` names, the discs an `.m3u` lists and the `.img`/`.sub` of a `.ccd` are not listed as
-games of their own.
+games of their own. Games can also be played from a NAS or PC on your network (SMB or NFS shares, CD games included):
+see [Network shares](#network-shares-smb-and-nfs). `.7z` archives: see [Zip and 7-Zip archives](#zip-and-7-zip-archives).
 
 **Inside the emulator, to access the main menu press L3 + R3.**
 
@@ -34,13 +35,15 @@ Everything outside `ps5/` is Beetle PCE's source (the original README is
 [README-Beetle-PCE.md](README-Beetle-PCE.md)), with a few changes listed in [The core](#the-core). The frontend
 drives the core through its libretro interface and plays the part RetroArch plays on a PC.
 
-> **Status (1.0.1):** builds with the ps5-payload-dev SDK into a signed native app, and passes 291 host tests, which
+> **Status (1.1):** builds with the ps5-payload-dev SDK into a signed native app, and passes 416 host tests, which
 > run the same code (the Beetle PCE core included) on Linux with the PS5 calls simulated: a test HuCard (made by
 > `ps5/tests/make_test_rom.py`) is played through the whole chain -- the shelf, the pad, the core, the video and
 > sound output -- as a PC Engine card, a SuperGrafx card, a card with a copier header, a reversed TurboGrafx-16
-> dump, and as the System Card of a CD game. **It has not been run on a PS5 yet**, and no commercial game has
-> been tried with this port: please report what works and what doesn't. If something fails, the logs in
-> `/data/pce/logs/` say where.
+> dump, from a `.zip` and a `.7z`, and as the System Card of a CD game; games are played from a network share
+> standing in for a NAS (a CD's music streamed from it while the game runs). netfs's own 229 checks, the NFS
+> backend's and the 7z reader's 43 pass too. **It has not been run on a PS5 yet** (nor have network shares or
+> `.7z` archives), and no commercial game has been tried with this port: please report what works and what
+> doesn't. If something fails, the logs in `/data/pce/logs/` say where.
 
 ## The core
 
@@ -101,9 +104,24 @@ next to Genesis Plus GX PS5 (PPSA99921, helper port 9088), Snes9x PS5 (PPSA99922
 
 ## Versions
 
-Every release carries its version in the file name: `BeetlePCEPS5-v1.0.1.elf` and `pce-ps5-v1.0.1-src.zip`
+Every release carries its version in the file name: `BeetlePCEPS5-v1.1.elf` and `pce-ps5-v1.1-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`BeetlePCEPS5.elf`" always means the current release's ELF.
+
+**1.1:** network shares and 7-Zip archives, as Genesis Plus GX PS5 has them (thanks to CroCop86 for asking,
+[issue #3](https://github.com/MisterTemaki/genplusgxPS5/issues/3)).
+- **Games on network shares (SMB and NFS):** keep your HuCards and CD games on a NAS or PC and play them from the
+  shelf (Settings, LIBRARY, Network shares, with an on-screen keyboard and Test connection). HuCards are read whole;
+  CD games (`.cue`/`.bin`, `.chd`, `.ccd`, `.toc`, `.m3u`) stream from the share while you play, their music
+  included. Saves, states, System Cards and covers stay on the console. From Genesis Plus GX PS5 2.1.1, after the
+  design of [thatboialex](https://github.com/thatboialex)'s pull request to Snes9x PS5
+  ([#3](https://github.com/MisterTemaki/snes9xPS5/pull/3)). See [Network shares](#network-shares-smb-and-nfs).
+- **Shelf tabs:** Internal, USB and Network; L1 / R1 switch tabs, Up / Down the system, **L2 / R2 skip 10 games**
+  (L1 / R1 did before), Square on the Network tab scans the shares again.
+- **7-Zip:** HuCards inside `.7z` archives (LZMA, LZMA2, PPMd...), named and covered from the CRC the archive keeps,
+  as zipped ones are. See [Zip and 7-Zip archives](#zip-and-7-zip-archives).
+- The new screens in the five languages. libsmb2 and libnfs (LGPL-2.1-or-later) are built in, as Genesis Plus GX PS5
+  and Snes9x PS5 carry them; the 7z decoder is the LZMA SDK's (public domain).
 
 **1.0.1:** the interface in five languages (English, Spanish, Portuguese (Brazil), French, German: Settings,
 SYSTEM, Language); the debug logs are off by default.
@@ -153,10 +171,10 @@ PC Engine's button names, the System Cards' and the shaders' names are not trans
 
 1. **Send `BeetlePCEPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < BeetlePCEPS5-v1.0.1.elf
+   nc -q0 PS5_IP 9021 < BeetlePCEPS5-v1.1.elf
    ```
    It installs the app in `/data/homebrew/PPSA99925/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the
-   icon and the backgrounds), shows **"Beetle PCE PS5 1.0.1 installed. Open it from the Beetle PCE PS5 icon on the
+   icon and the backgrounds), shows **"Beetle PCE PS5 1.1 installed. Open it from the Beetle PCE PS5 icon on the
    home screen."** and stays running as the helper.
 2. **Open the Beetle PCE PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your games** to their system's folder, over FTP for example. The app makes the folders on its first
@@ -192,6 +210,7 @@ and exits.
 | `/data/pce/covers/<system>` | downloaded covers and your own, one folder per system (the same names as in `roms/`); `covers/` itself keeps `wanted.txt` and `crc-cache.txt` |
 | `/data/pce/logs` | `boot.log` (the app), `installer.log` (installer/helper), `helper.log` (the helper the app starts), and the previous session's `.prev.log` files |
 | `/data/pce/pce-ps5.ini` | the menu settings |
+| `/data/pce/shares.txt` | the network shares (Settings, Network shares; see [Network shares](#network-shares-smb-and-nfs)) |
 
 ### The System Cards (CD games)
 
@@ -246,10 +265,14 @@ changed, register it again once: select **Beetle PCE PS5** on the home screen, p
 The start screen is a 3D shelf of game covers, like PS5SX2's and Genesis Plus GX PS5's, with the author's line under
 the wordmark: **github.com/MisterTemaki**.
 
-- **All your games at once:** the shelf gathers the games in `/data/pce/roms` (its system folders) and on USB
-  drives (`pce/roms`), subfolders included, sorted by name. Each game's line says its system and region.
-- **One system at a time:** **Up / Down** switch between "All games" and each system that has games (PC Engine,
-  SuperGrafx, PC Engine CD). The shelf remembers the last one.
+- **All your games, in tabs:** the shelf gathers the games in `/data/pce/roms` (its system folders), on USB drives
+  (`pce/roms`) and on network shares, subfolders included, sorted by name. Each game's line says its system and
+  region. A bar at the top keeps them apart, as Genesis Plus GX PS5's (and PSFlycast's library) does: **Internal**
+  (the console's drive), **USB** (only while a game is on a USB drive) and **Network** (games on a share, see
+  [Network shares](#network-shares-smb-and-nfs)). **L1 / R1** go round the tabs; each tab keeps its place, and the
+  shelf opens on the tab you used last.
+- **One system at a time:** inside a tab, **Up / Down** switch between "All games" and each system that has games
+  there (PC Engine, SuperGrafx, PC Engine CD). The shelf remembers the last one.
 - **Official names:** a HuCard is identified by its file name or, when that doesn't match, by its CRC32, looked up
   in a table built into the app (No-Intro, from libretro-database: 491 PC Engine / TurboGrafx-16 entries and the
   SuperGrafx ones; Redump names for 495 CD games, matched by file name).
@@ -258,8 +281,8 @@ the wordmark: **github.com/MisterTemaki**.
   - HuCards and SuperGrafx cards are searched together: a SuperGrafx game saved as `.pce` is named, covered and
     started as one.
   - Loose names (`r-type.pce`) are recognised too.
-  - CRCs are cached in `covers/crc-cache.txt`, so each card is read once; a zipped card's CRC comes from the zip's
-    directory, and each zip's system is remembered, so a big library on a USB drive isn't opened zip by zip at
+  - CRCs are cached in `covers/crc-cache.txt`, so each card is read once; a zipped (or 7-Zipped) card's CRC comes
+    from the archive's directory, and each archive's system is remembered, so a big library on a USB drive isn't opened zip by zip at
     every start. "Looking for games..." counts the games found, then shows a bar while they are identified.
 - **Automatic covers, in the background:** box art comes from
   [libretro-thumbnails](https://github.com/libretro-thumbnails) (each system's `Named_Boxarts`) over HTTPS, the
@@ -275,8 +298,8 @@ the wordmark: **github.com/MisterTemaki**.
     after 30 days; **Square** forces a new try.
   - Without a network nothing is tried and the shelf works the same.
 - **Your own covers:** a `.png` or `.jpg` named after the ROM file, in `/data/pce/covers/<system>/`
-  (`covers/PCEngine/R-Type.png` for `roms/PCEngine/R-Type.pce`), in `covers/` itself, or next to the ROM, takes
-  priority over downloads.
+  (`covers/PCEngine/R-Type.png` for `roms/PCEngine/R-Type.pce`), in `covers/` itself, or next to the ROM (not on a
+  network share), takes priority over downloads.
 - **No cover:** the game gets a card with its title and system.
 - **Turning downloads off:** Settings, "Download covers".
 
@@ -310,6 +333,79 @@ Notes:
 The shelf is drawn by the CPU in real 3D perspective (each cover a quad turned about the vertical axis, drawn
 column by column with bilinear filtering, mipmaps and anti-aliased edges, split across several cores).
 
+## Network shares (SMB and NFS)
+
+Games can be read from a Windows, Samba, NAS or router share instead of a drive: Genesis Plus GX PS5 2.1.1's network
+shares, which come from Snes9x PS5, where they are by [thatboialex](https://github.com/thatboialex) (pull request
+[#3](https://github.com/MisterTemaki/snes9xPS5/pull/3)). Add one on the console: **Settings (Triangle on the shelf) >
+LIBRARY > Network shares > Add a share**. Pick SMB or NFS, type the server's IP address, the share (or export) and,
+if it needs them, a user name and password with the on-screen keyboard (D-pad and Cross; Square deletes, Triangle
+is a space, L1 / R1 move the cursor, L2 is Shift, R2 the symbols page, OPTIONS is Done). **Test connection** says
+what is in the folder, or why it cannot be reached, before you save. Open a share in the list to change or remove
+it. (In the settings opened from the pause menu the row can't be chosen: changing the shares reconnects them, and
+the game may be reading from one.)
+
+The screen keeps its shares in `/data/pce/shares.txt` (the first run writes it with examples). You can edit the
+file instead, one address per line (up to 8); the screen changes only the line you edit and keeps your comments:
+
+```
+smb://192.168.1.50/games/pce
+smb://jason@192.168.1.50/games/pce?password=secret
+nfs://192.168.1.50/export/pce
+```
+
+Use the server's IP address. Inside a user name, password or folder, write `& = % # @ ; / ? ` and spaces as `%XX`
+(`p@ss` is `p%40ss`). The password sits in this file in plain text (it is never written to a log or shown).
+
+- The share's games appear on the **Network** tab as soon as it has connected; the other tabs do not wait for it.
+  While a share is connecting, or cannot be reached, the tab says so (and why, in a sentence), and with no share
+  set up it points to Settings > Network shares. **Square** on the tab scans again: it forgets the folder
+  listings and connects the shares that were down once more. The system folders work there too (`PCEngine/`,
+  `SuperGrafx/`, `PCEngineCD/`), and Up / Down pick a system inside the tab.
+- Network games are first named from their file names; a background pass then reads each HuCard once to name it by
+  checksum (a `.zip` or `.7z`: only its directory, which also says its system), and the answer is remembered in
+  `covers/crc-cache.txt`. A cover for a game named late is fetched when it is. Until an archive on a share has been
+  looked into, its folder's name gives its system (`SuperGrafx/`), else it is listed with the PC Engine games. A
+  file that could not be read (a link that dropped) is tried again at the next visit of the shelf, never
+  remembered as unreadable.
+- A share is read-only. Saves, states, the backup RAM, covers and settings stay on the console, and so do the
+  System Cards (`/data/pce/bios`).
+- **HuCards** are read into memory when they start. **CD games** (`.cue` with its tracks -- `.bin`, `.iso`, `.wav`,
+  `.ogg` --, `.chd`, `.ccd` with its `.img`/`.sub`, `.toc`, `.m3u`) are not copied to the console: the core reads
+  the disc from the share while the game runs, through a cache of 512 KiB blocks that reads ahead of it (the CD's
+  music too). On a wired or good Wi-Fi network that is seamless; on a slow link, a jump to a part of the disc that
+  is not cached yet makes the game wait for it (a short pause; `[net] ... waited for <file> in realtime` in the
+  log).
+- If a share cannot be reached, a notification says why (no answer, wrong password, share not found...) and the
+  same sentence is in `/data/pce/logs/boot.log` (`[net]`). A share lost while a game runs is announced once; the
+  game goes on with what it has.
+- SMB uses libsmb2 and NFS uses libnfs; both are LGPL-2.1-or-later and sit in `ps5/third_party/` with their licence
+  notices.
+
+## Zip and 7-Zip archives
+
+A HuCard (`.pce`, `.sgx`) can sit inside a `.zip` or a `.7z`. The game's system comes from the card inside, and the
+shelf names it, and finds its cover, from the CRC32 the archive's directory keeps for it (nothing is unpacked for
+that), as for the same card unzipped. The card is unpacked into memory when the game starts.
+
+- **Several files in one archive:** the first HuCard (`.pce`, `.sgx`) in the archive's order is the game (a text file
+  or a picture next to it is skipped); the others are not listed. An archive with no `.pce` or `.sgx` in it is not a
+  game (as for a zip: no file is taken for a HuCard by its size).
+- **CD games inside an archive are not supported** (they would have to be unpacked whole first): an archive that
+  holds only a disc image (`.cue`, `.bin`, `.chd`, `.iso`...) is not listed. Unpack CD games, or keep them on a
+  network share.
+- **7-Zip methods:** LZMA, LZMA2 (7-Zip's default), PPMd, with the BCJ / BCJ2 / ARM / Delta filters, and stored files.
+  Not BZip2, Deflate or Zstandard (7-Zip's other choices), and not encrypted archives: such an archive says on the
+  screen why it can't start (the method, "encrypted", a damaged archive), as a bad zip does. An archive with
+  encrypted names is not listed at all.
+- **Limits:** a card of 16 MiB at most (the biggest HuCard mapper takes 8.5 MiB). A "solid" `.7z` packs several files
+  in one block, and the whole block is unpacked to reach one file: a block over 64 MiB is refused (pack big
+  collections one game per archive, or non-solid). Everything unpacking one archive needs (the block, the directory,
+  PPMd's model) comes out of 136 MiB, and an archive listing more than 65,536 files is refused.
+- A `.7z` on a network share is read through the share like any file.
+- The 7z decoder is the [LZMA SDK](https://www.7-zip.org/sdk.html)'s C decoder (7-Zip 26.05, public domain,
+  `ps5/third_party/lzma7z/`).
+
 ## Controls
 
 **Inside the emulator, to access the main menu press L3 + R3.**
@@ -320,10 +416,11 @@ column by column with bilinear filtering, mipmaps and anti-aliased edges, split 
 |---|---|
 | Left / Right (D-pad or stick) | change game (hold to speed up) |
 | Up / Down | change system (All games, PC Engine, SuperGrafx, PC Engine CD) |
-| L1 / R1 | skip 10 games |
+| L1 / R1 | next / previous tab (Internal, USB, Network) |
+| L2 / R2 | skip 10 games |
 | Cross | play |
 | Triangle | settings |
-| Square | download this game's cover again (the cover it has stays until the new one has arrived) |
+| Square | download this game's cover again (the cover it has stays until the new one has arrived); on the Network tab: scan the shares again |
 | OPTIONS | quit Beetle PCE PS5 (asks first) |
 
 **In a game:** by default, buttons by position, as RetroArch maps them for Beetle PCE. The PC Engine pad has II on
@@ -383,7 +480,8 @@ setting.
   button, the PS5 button that presses it: Cross, Circle, Square, Triangle, L1, R1, OPTIONS, the touchpad, or none;
   **Default button layout** puts them back). L2, R2, L3 and R3 stay for the hot keys and menus, and the menus always
   use Cross / Circle.
-- **Library:** download covers.
+- **Library:** download covers; **Network shares** (see [Network shares](#network-shares-smb-and-nfs); not in the
+  settings opened over a game).
 - **System:** **Language** -- see [Language](#language); **Debug logs** (Off by default since 1.0.1) -- see [Debugging](#debugging-logs-and-crashes); **Updates** -- see
   [Updates](#updates).
 
@@ -488,7 +586,12 @@ covers, emu, menu), and the return addresses, which map into `ps5/build/app/pce-
   although the core has them.
 - An `.m3u` loads all its discs, but the frontend has no "change disc" yet: the first disc is the one inserted.
 - No cheats, no HES music files (`.hes`), no PC-FX (another core).
-- `.7z` archives are not read (`.zip` is, for HuCards); CD games are not read from inside a zip.
+- CD games are not read from inside a `.zip` or a `.7z` (HuCards are); `.7z` archives packed with BZip2, Deflate or
+  Zstandard, or encrypted, are refused.
+- Network shares: SMB 2/3 and NFS 3/4, read only, up to 8; names of servers often don't resolve on the console (use
+  the IP address). Tested here with a folder of the test machine standing in for the share, and the NFS backend against a mock
+  and loopback sockets; not yet on a PS5, nor against a real NAS in this port (Genesis Plus GX PS5 and Snes9x PS5 run
+  the same code).
 
 ## Building
 
@@ -502,7 +605,9 @@ make ps5 -j$(nproc)              # build/ps5/BeetlePCEPS5.elf (installer + helpe
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/BeetlePCEPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99925/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 271 host tests (ASan/UBSan)
+make test                        # Linux builds (app, installer, helper) + 416 host tests (ASan/UBSan), with netfs's,
+                                 # the NFS backend's, the tabs' and the 7z reader's unit tests (and the SMB backend's
+                                 # against a real Samba, skipped without smbd and pdbedit)
 make bench                       # the core alone, -O3 for Zen 2: build/bench/pce-bench <card.pce> [frames]
 ```
 
@@ -555,8 +660,24 @@ The build has three stages:
   - `fe_tlshttp.cpp`, `fe_mbedtls_config.h`, `data/cacert.pem`: the helper's own HTTPS client (sockets, Mbed TLS,
     Mozilla's CA list);
   - `fe_menu.cpp`, `fe_settings.cpp`, `fe_text.cpp`: menus, settings, text with PS5SX2's fonts;
+  - `fe_netscreen.cpp`, `fe_osk.cpp`, `fe_ui.cpp`: Settings > Network shares, its on-screen keyboard and the screens'
+    common drawing; `fe_tabs.h`: the shelf's storage tabs (from Genesis Plus GX PS5 and Snes9x PS5);
+  - `fe_7z.cpp`: HuCards inside a `.7z`, read through the app's stdio calls with the LZMA SDK's decoder;
   - `third_party/`: minizip (unzip.c, ioapi.c); Mbed TLS 3.6.7 (`mbedtls/`, its `include/` and `library/` as
     released).
+- **`ps5/netfs/`**: network shares as folders (from Genesis Plus GX PS5 2.1.1 and Snes9x PS5): `shares.txt`
+  (`netfs_share.cpp`, `netfs_edit.cpp`), the connections and their watchdog (`netfs_core.cpp`), folder listings and
+  file blocks with read-ahead (`netfs_cache.cpp`), the libc calls for `/smb/...` and `/nfs/...` paths
+  (`netfs_vfs.cpp`, `netfs_wrap.cpp`: the link's `--wrap` list, so the core -- Mednafen's file streams over
+  libretro-common's, the CD readers, libchdr -- and minizip and the 7z reader read a share like a drive), the SMB and
+  NFS backends (`backend_smb.cpp`, `backend_nfs.cpp`) and the console's socket and resolver shims
+  (`netfs_shims_ps5.cpp`). **`ps5/third_party/libsmb2/`**, **`ps5/third_party/libnfs/`**: the two libraries, as
+  Genesis Plus GX PS5 and Snes9x PS5 carry them. **`ps5/third_party/lzma7z/`**: the LZMA SDK 26.05's C 7z decoder,
+  its names prefixed so it can't meet the core's older LZMA SDK (its README says how). On the host,
+  `ps5/host/netfs_dirbackend.cpp` turns a share into a local folder (`PCEPS5_HOST_NETFS_DIR`); netfs's own tests
+  are `test-netfs` (an in-memory share), `make test-nfs` (the NFS backend on a mock and on loopback sockets),
+  `make test-nfs-server` (a real unfsd), `smb-test` (a real Samba, skipped without `smbd`), `make test-tabs`, and
+  the 7z reader's `make test-7z` (the archives in `ps5/tests/7z/`, made by `tests/make_7z_fixtures.py`).
 - **`ps5/proto/native/`**: ps5-native-app-boilerplate's tools (BlackBearReloaded, GPL-3.0), taken from PS5SX2
   and PS5_Vulkan (mihawk-99): `ps5-native-tool`, `app_crt.cpp`, `ps5-pie.ld`, `libc_builder.cpp` and its
   manifests.
@@ -572,7 +693,12 @@ The build has three stages:
   and sandbox request, saves per system and the backup RAM (written when it changes, an erase too, not when
   unchanged), the edge cases (720p picture, Resume, FIFOs, disc sheets, long zip names and paths, a card too big
   for its mapper, the CRC cache, covers kept offline, downloads after a tab change), the debug logs setting, the
-  helper's HTTPS, the updates and a big library's scan.
+  helper's HTTPS, the updates and a big library's scan; the network shares (a local folder standing in for the NAS:
+  a HuCard and CD games started from a share, the CD's music streamed from it while the game runs -- the stand-in
+  System Card `make_test_rom.py cdplay` plays a track of `make_test_cd.py`'s disc, and `check_tone.py` checks its
+  pitch --, a slow link, read errors, the background CRC pass, the Network shares screen typed with its keyboard,
+  the storage tabs, their translations); the `.7z` archives (every method and refusal, a 7z named and covered as its
+  zip twin, a 7z on a share).
 
 ## License and credits
 
@@ -590,6 +716,19 @@ The build has three stages:
   `app_cpp_runtime.cpp`, `ps5-pie.ld` and the `libc.prx` generator, via PS5SX2 and PS5_Vulkan (mihawk-99).
 - The VideoOut tiling and setup follow the SDK's SDL2 port (zlib license).
 - **minizip** (Gilles Vollant): zlib license.
+- **libsmb2** (Ronnie Sahlberg and contributors, [github.com/sahlberg/libsmb2](https://github.com/sahlberg/libsmb2))
+  and **libnfs** (Ronnie Sahlberg and contributors, [github.com/sahlberg/libnfs](https://github.com/sahlberg/libnfs)):
+  LGPL-2.1-or-later, linked statically into the app for the network shares. Their full source, with the few changes
+  Snes9x PS5 made (`ps5/third_party/libnfs/PATCHES.md`, `ps5/third_party/libsmb2/README.snes9xps5`), is in this
+  repository and in each release's source zip, together with everything needed to rebuild and relink the app with a
+  modified version. libsmb2 also contains code under other terms: "derived from the RSA Data Security, Inc. MD4
+  Message-Digest Algorithm", public-domain AES and MD5, and the RFC 4634 SHA/HMAC code (its notices are in the
+  files); libnfs's generated RPC code is under its BSD licence.
+- **The network share code** (`ps5/netfs/`, the Network shares screen, the on-screen keyboard) and the shelf's
+  storage tabs come from Genesis Plus GX PS5 2.1.1, which took them from Snes9x PS5, where they are by
+  [thatboialex](https://github.com/thatboialex) (pull request [#3](https://github.com/MisterTemaki/snes9xPS5/pull/3)).
+- **LZMA SDK** (Igor Pavlov, [7-zip.org/sdk.html](https://www.7-zip.org/sdk.html)), 7-Zip 26.05's C 7z decoder:
+  public domain (`ps5/third_party/lzma7z/README.md`).
 - **Mbed TLS** 3.6.7 ([github.com/Mbed-TLS/mbedtls](https://github.com/Mbed-TLS/mbedtls), the Mbed TLS
   contributors): Apache-2.0 (`ps5/frontend/third_party/mbedtls/LICENSE`).
 - **Mozilla's CA certificate list** (`ps5/frontend/data/cacert.pem`, as packaged by
