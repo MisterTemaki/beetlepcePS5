@@ -654,6 +654,32 @@ void netfs_prepare_game(const std::string& rom_path, int head_wait_ms)
 		r.share->cache().PrepareGame(r.rel, head_wait_ms);
 }
 
+uint64_t netfs_prefetch(const std::vector<NetfsSpan>& spans, int first_wait_ms, uint64_t budget)
+{
+	// grouped by share, in the order given (the first span's share first)
+	std::vector<std::pair<std::shared_ptr<Share>, std::vector<std::pair<std::string, std::pair<uint64_t, uint64_t>>>>> by_share;
+	for (const NetfsSpan& sp : spans)
+	{
+		Route r;
+		if (!Resolve(sp.path.c_str(), r) || r.share->State() != NetfsState::Ready)
+			continue;
+		auto it = std::find_if(by_share.begin(), by_share.end(), [&](const auto& e) { return e.first == r.share; });
+		if (it == by_share.end())
+		{
+			by_share.push_back({r.share, {}});
+			it = by_share.end() - 1;
+		}
+		it->second.push_back({r.rel, {sp.offset, sp.length}});
+	}
+	uint64_t kept = 0;
+	for (auto& e : by_share)
+	{
+		kept += e.first->cache().Prefetch(e.second, first_wait_ms, budget - kept);
+		first_wait_ms = 0; // only the first share's first span is waited for
+	}
+	return kept;
+}
+
 void netfs_end_game()
 {
 	for (const std::shared_ptr<Share>& s : *Shares())

@@ -35,7 +35,7 @@ Everything outside `ps5/` is Beetle PCE's source (the original README is
 [README-Beetle-PCE.md](README-Beetle-PCE.md)), with a few changes listed in [The core](#the-core). The frontend
 drives the core through its libretro interface and plays the part RetroArch plays on a PC.
 
-> **Status (1.1):** builds with the ps5-payload-dev SDK into a signed native app, and passes 416 host tests, which
+> **Status (1.1):** builds with the ps5-payload-dev SDK into a signed native app, and passes 424 host tests, which
 > run the same code (the Beetle PCE core included) on Linux with the PS5 calls simulated: a test HuCard (made by
 > `ps5/tests/make_test_rom.py`) is played through the whole chain -- the shelf, the pad, the core, the video and
 > sound output -- as a PC Engine card, a SuperGrafx card, a card with a copier header, a reversed TurboGrafx-16
@@ -373,9 +373,12 @@ Use the server's IP address. Inside a user name, password or folder, write `& = 
 - **HuCards** are read into memory when they start. **CD games** (`.cue` with its tracks -- `.bin`, `.iso`, `.wav`,
   `.ogg` --, `.chd`, `.ccd` with its `.img`/`.sub`, `.toc`, `.m3u`) are not copied to the console: the core reads
   the disc from the share while the game runs, through a cache of 512 KiB blocks that reads ahead of it (the CD's
-  music too). On a wired or good Wi-Fi network that is seamless; on a slow link, a jump to a part of the disc that
-  is not cached yet makes the game wait for it (a short pause; `[net] ... waited for <file> in realtime` in the
-  log).
+  music too). Before the game starts, the first megabyte of each of the disc's files and tracks (up to 64 MiB) is
+  fetched and kept in memory while the game runs, so the System Card's boot and the start of a track's music don't
+  wait for the network. The rest is read as the game goes: on a wired or good Wi-Fi network that is seamless; on a
+  slow link, a jump to a part of the disc that is not cached yet makes the game wait for it (a short pause;
+  `[net] ... waited for <file> in realtime` in the log), and a share that stops answering holds the game until the
+  connection is given up (5 seconds); after that, reads from that share fail and a notification says so.
 - If a share cannot be reached, a notification says why (no answer, wrong password, share not found...) and the
   same sentence is in `/data/pce/logs/boot.log` (`[net]`). A share lost while a game runs is announced once; the
   game goes on with what it has.
@@ -605,7 +608,7 @@ make ps5 -j$(nproc)              # build/ps5/BeetlePCEPS5.elf (installer + helpe
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/BeetlePCEPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99925/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 416 host tests (ASan/UBSan), with netfs's,
+make test                        # Linux builds (app, installer, helper) + 424 host tests (ASan/UBSan), with netfs's,
                                  # the NFS backend's, the tabs' and the 7z reader's unit tests (and the SMB backend's
                                  # against a real Samba, skipped without smbd and pdbedit)
 make bench                       # the core alone, -O3 for Zen 2: build/bench/pce-bench <card.pce> [frames]

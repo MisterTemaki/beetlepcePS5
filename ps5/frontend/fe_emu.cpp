@@ -207,18 +207,29 @@ bool FileExists(const std::string& p)
 	return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
 }
 
-bool ReadFile(const std::string& path, std::vector<uint8_t>& out)
+// The whole file, or false: one bigger than max_size is refused before anything is read, and a read that stops short
+// or fails (a share that drops mid-read) is a failure, not a cut file.
+bool ReadFile(const std::string& path, std::vector<uint8_t>& out, uint64_t max_size = 256u << 20)
 {
+	out.clear();
 	FILE* f = fopen(path.c_str(), "rb");
 	if (!f)
 		return false;
-	out.clear();
-	uint8_t buf[65536];
-	size_t n;
-	while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
-		out.insert(out.end(), buf, buf + n);
+	off_t size = -1;
+	if (fseeko(f, 0, SEEK_END) == 0)
+		size = ftello(f);
+	if (size < 0 || uint64_t(size) > max_size || fseeko(f, 0, SEEK_SET) != 0)
+	{
+		fclose(f);
+		return false;
+	}
+	out.resize(size_t(size));
+	const size_t n = size ? fread(out.data(), 1, out.size(), f) : 0;
+	const bool ok = n == out.size() && ferror(f) == 0;
 	fclose(f);
-	return true;
+	if (!ok)
+		out.clear();
+	return ok;
 }
 
 // data -> path.part, flushed to the disk (fsync) and closed without error, then renamed over path: the old file or
@@ -256,6 +267,10 @@ struct State
 	std::string path, name, dir, ext; // the game; ext without the dot
 	fe::System system = fe::System::Pce;
 	std::vector<uint8_t> rom; // a HuCard, read here (from its file, a .zip or a .7z) and put right when reversed
+	std::string inner;        // the HuCard's name inside its archive ("" for a plain file)
+	// what a power cycle hands to the LoadGame it calls: the HuCard already in memory, not read again
+	std::vector<uint8_t> kept_rom;
+	std::string kept_rom_path, kept_inner;
 	retro_game_info_ext info_ext = {};
 	std::string sys_dir, save_dir;
 
@@ -860,6 +875,16 @@ void ApplySettings()
 bool ReadHuCard(const std::string& path, std::string* inner, std::string* error)
 {
 	const std::string file = path.substr(path.find_last_of('/') + 1);
+	if (!g.kept_rom.empty() && g.kept_rom_path == path)
+	{
+		// a power cycle: the card read for this game a moment ago (already put right), not read again (from a share)
+		g.rom = std::move(g.kept_rom);
+		*inner = g.kept_inner;
+		g.kept_rom.clear();
+		g.kept_rom_path.clear();
+		OrbisLog("[emu] power cycle: %s kept in memory, not read again", file.c_str());
+		return true;
+	}
 	if (fe::IsArchiveExt(ExtOf(path)))
 	{
 		std::string why;
@@ -872,7 +897,7 @@ bool ReadHuCard(const std::string& path, std::string* inner, std::string* error)
 			return false;
 		}
 	}
-	else if (!ReadFile(path, g.rom) || g.rom.empty() || g.rom.size() > 16u * 1024 * 1024)
+	else if (!ReadFile(path, g.rom, 16u * 1024 * 1024) || g.rom.empty())
 	{
 		OrbisLog("[emu] could not read %s (%zu bytes)", path.c_str(), g.rom.size());
 		if (error)
@@ -926,6 +951,7 @@ bool LoadGame(const std::string& path, std::string* error)
 		if (!inner.empty())
 			ext = ExtOf(inner);
 	}
+	g.inner = inner;
 	if (!fe::SystemForExt(ext, &g.system))
 		g.system = fe::System::Pce;
 	// a SuperGrafx game kept as .pce (the game table knows it): started as one, as the core does for a .sgx file
@@ -961,6 +987,18 @@ bool LoadGame(const std::string& path, std::string* error)
 			netfs_end_game();
 			g.path.clear();
 			return false;
+		}
+		if (netfs_is_network_path(path.c_str()))
+		{
+			// a disc on a share: the start of each of its files and tracks fetched ahead and kept while the game runs
+			// (the boot, a track's music starting), so the emulation thread doesn't wait for those; the start of the
+			// disc is waited for (3 s at most), the rest arrives while the System Card boots
+			std::vector<NetfsSpan> spans;
+			for (const fe::DiscSpan& d : fe::DiscSpans(path))
+				spans.push_back({d.path, d.offset, d.length});
+			const uint64_t kept = netfs_prefetch(spans, 3000, 64ull << 20);
+			OrbisLog("[emu] %s: %zu span(s) of the disc fetched ahead, %llu KiB kept", file.c_str(), spans.size(),
+				(unsigned long long)(kept >> 10));
 		}
 	}
 
@@ -1029,8 +1067,10 @@ bool LoadGame(const std::string& path, std::string* error)
 	OrbisMkdirs(SaveDir("saves"));
 	OrbisMkdirs(SaveDir("states"));
 	LoadSram();
-	// from here nothing on this thread waits for a share: a CD game on one streams through netfs's cache (blocks read
-	// ahead of the core), a HuCard was read whole above
+	// realtime from here: a HuCard was read whole above; a CD game on a share streams through netfs's cache (blocks
+	// read ahead of the core, the start of each track kept in memory). A seek to a part of the disc that is not cached
+	// yet still makes this thread wait for that block (a short pause; "waited for ... in realtime" in the log), and a
+	// share that stops answering holds it until the watchdog (5 s) cuts the connection.
 	netfs_set_realtime(true);
 	OrbisLog("[emu] running \"%s\" (%s), %.3f fps, %.0f Hz, aspect %.4f, state size %zu", g.name.c_str(),
 		SystemName().c_str(), g.fps, g.sample_rate, g.core_aspect, retro_serialize_size());
@@ -1139,9 +1179,19 @@ void PowerCycle()
 	if (!g.loaded)
 		return;
 	const std::string path = g.path;
+	// a HuCard is kept in memory across the power cycle (it may be on a share); a CD game is opened again by the core
+	if (!g.rom.empty())
+	{
+		g.kept_rom = g.rom;
+		g.kept_rom_path = path;
+		g.kept_inner = g.inner;
+	}
 	CloseGame();
 	std::string error;
-	if (!LoadGame(path, &error))
+	const bool ok = LoadGame(path, &error);
+	g.kept_rom.clear();
+	g.kept_rom_path.clear();
+	if (!ok)
 	{
 		OrbisLog("[emu] power cycle: %s", error.c_str());
 		ProsperoNotify(T("Beetle PCE PS5: the game could not be started again. %s"), error.c_str());

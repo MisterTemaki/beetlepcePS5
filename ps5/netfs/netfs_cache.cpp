@@ -546,6 +546,62 @@ void Cache::PrepareGame(const std::string& rom_rel, int head_wait_ms)
 			std::to_string(data_bytes) + " bytes of MSU-1 data");
 }
 
+uint64_t Cache::Prefetch(const std::vector<std::pair<std::string, std::pair<uint64_t, uint64_t>>>& spans, int first_wait_ms,
+	uint64_t budget)
+{
+	EnsureWorker();
+	uint64_t kept_bytes = 0;
+	std::vector<std::shared_ptr<FileData>> files;
+	std::shared_ptr<FileData> first;
+	size_t first_from = 0, first_to = 0;
+	for (const auto& span : spans)
+	{
+		Attr a;
+		std::string path;
+		if (!Stat(span.first, a, &path).ok() || a.is_dir || a.size == 0 || span.second.first >= a.size)
+			continue;
+		std::shared_ptr<FileData> f = GetFile(path, a);
+		const uint64_t end = std::min<uint64_t>(a.size, span.second.first + std::max<uint64_t>(span.second.second, 1));
+		const size_t from = size_t(span.second.first / f->block_size), to = size_t((end - 1) / f->block_size);
+		bool any = false;
+		for (size_t b = from; b <= to && b < f->BlockCount(); b++)
+		{
+			if (kept_bytes + f->block_size > budget)
+				break;
+			kept_bytes += f->block_size;
+			f->Pin(b);
+			any = true;
+		}
+		if (!any)
+			continue;
+		if (!first)
+		{
+			first = f;
+			first_from = from;
+			first_to = to;
+		}
+		files.push_back(f);
+	}
+	{
+		std::lock_guard<std::mutex> lk(m_mu);
+		m_kept.insert(m_kept.end(), files.begin(), files.end());
+	}
+	// the first span (where the disc starts): waited for, as far as the deadline; the others arrive in the background
+	using namespace std::chrono;
+	const auto until = steady_clock::now() + milliseconds(first_wait_ms);
+	size_t ready = 0, wanted = 0;
+	for (size_t b = first_from; first && b <= first_to && b < first->BlockCount(); b++)
+	{
+		wanted++;
+		const int64_t left = duration_cast<milliseconds>(until - steady_clock::now()).count();
+		if (first->WaitBlock(b, (int)std::max<int64_t>(left, 0)) == Block::Ready)
+			ready++;
+	}
+	Log(m_share.label + ": prefetch for a disc: " + std::to_string(files.size()) + " span(s), " + std::to_string(kept_bytes) +
+		" bytes kept; the first: " + std::to_string(ready) + "/" + std::to_string(wanted) + " block(s) here");
+	return kept_bytes;
+}
+
 void Cache::EndGame()
 {
 	std::vector<std::shared_ptr<FileData>> kept;

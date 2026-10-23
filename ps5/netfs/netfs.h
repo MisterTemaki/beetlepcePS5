@@ -134,6 +134,18 @@ private:
 // and the first 128 KiB of up to 64 tracks. Waits for the data, and for the track heads up to head_wait_ms.
 // Does nothing for other paths and for a share that is not ready.
 void netfs_prepare_game(const std::string& rom_path, int head_wait_ms = 3000);
+// Before a disc game on a share starts (its .cue's tracks, a .chd...): the blocks that hold each span (path, offset,
+// length) are fetched in the background, in the order given, and kept in memory until netfs_end_game, so the
+// emulation thread does not wait for them when the game seeks there (the boot, each track's start). Spans past
+// `budget` bytes are left out. Waits for the first span up to first_wait_ms (the rest keep arriving while the game
+// starts). Paths that are not on a ready share are skipped. Returns the bytes kept.
+struct NetfsSpan
+{
+	std::string path;
+	uint64_t offset = 0;
+	uint64_t length = 0;
+};
+uint64_t netfs_prefetch(const std::vector<NetfsSpan>& spans, int first_wait_ms, uint64_t budget);
 // After CloseGame: lets go of what netfs_prepare_game kept.
 void netfs_end_game();
 // Forget the cached folder listings (the frontend's rescan). They expire after 60 s on their own.

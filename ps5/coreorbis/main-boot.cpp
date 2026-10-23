@@ -78,8 +78,18 @@ bool PlayGame(const std::string& rom, bool from_command_line)
 	std::string error;
 	if (!emu::LoadGame(rom, &error))
 	{
-		// a game on a share says why (no answer, wrong password...); netfs's sentences carry no password
-		const std::string why = netfs_is_network_path(rom.c_str()) ? netfs_last_error() : std::string();
+		// a game on a share that is down says why (no answer, wrong password...): that share's own sentence, only when
+		// the share failed or was lost (a missing System Card on a connected share is not the network's fault); netfs's
+		// sentences carry no password
+		std::string why;
+		for (const NetfsShareInfo& sh : netfs_shares())
+			if (rom.size() > sh.mount_point.size() && rom.compare(0, sh.mount_point.size(), sh.mount_point) == 0 &&
+				rom[sh.mount_point.size()] == '/' && (sh.state == NetfsState::Failed || sh.state == NetfsState::Dead))
+			{
+				char text[512];
+				snprintf(text, sizeof text, fe::T("%s is not available."), sh.label.c_str());
+				why = sh.error.empty() ? std::string(text) : sh.error;
+			}
 		const std::string file = rom.substr(rom.find_last_of('/') + 1);
 		ProsperoNotify(fe::T("Beetle PCE PS5: could not start %s"), (file + (why.empty() ? "" : " - " + why)).c_str());
 		fe::MessageBox("Could not start the game", why.empty() ? error : error + " " + why);

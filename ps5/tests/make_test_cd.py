@@ -4,7 +4,10 @@ on the left, 1500 Hz on the right -- so the tests can check the CD audio that co
 channels, its byte order and its level. The test card made with `make_test_rom.py <syscard> cdplay` stands in for the
 System Card and plays track 2 in a loop, so the disc is read while the game runs (from a share: through netfs).
 
-  make_test_cd.py <out>
+  make_test_cd.py <out> [--long]
+
+--long makes the audio track 16 s long (instead of 4 s): more than the first megabyte of a track the app fetches
+ahead for a disc on a share.
 
 The output's extension picks the layout:
   .cue   one .bin of raw 2352-byte sectors, both tracks, and the sheet
@@ -104,8 +107,11 @@ def chd(path, data, audio):
 
 
 def main():
-    if len(sys.argv) != 2:
+    global AUDIO_FRAMES
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "--long"):
         raise SystemExit(__doc__)
+    if len(sys.argv) == 3:
+        AUDIO_FRAMES = 1200
     out = sys.argv[1]
     base, ext = os.path.splitext(out)
     name = os.path.basename(base)

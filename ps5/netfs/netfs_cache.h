@@ -132,6 +132,11 @@ public:
 
 	// Before a game starts: fetches the MSU-1 files that sit beside the ROM. See netfs_prepare_game.
 	void PrepareGame(const std::string& rom_rel, int head_wait_ms);
+	// Before a disc game starts: the blocks that hold each span are fetched, first span first, and kept until EndGame.
+	// Spans past `budget` bytes are left out. Waits for the first span up to first_wait_ms. See netfs_prefetch.
+	// Returns the bytes kept.
+	uint64_t Prefetch(const std::vector<std::pair<std::string, std::pair<uint64_t, uint64_t>>>& spans, int first_wait_ms,
+		uint64_t budget);
 	void EndGame(); // lets go of what the game kept
 
 	void Enqueue(const std::shared_ptr<FileData>& f, size_t block);

@@ -121,6 +121,17 @@ private:
 	std::unique_ptr<Impl> m_i;
 };
 
+// Where a CD game is read first, for netfs_prefetch (a disc on a network share): the start of every file its sheet
+// names (a .cue's tracks, a .toc's files, the first disc of an .m3u, a .ccd's .img and .sub, a .chd) and of every track
+// inside them (a .cue's INDEX 01, a .ccd's INDEX 1), a megabyte each, in the sheet's order.
+struct DiscSpan
+{
+	std::string path;
+	uint64_t offset = 0;
+	uint64_t length = 0;
+};
+std::vector<DiscSpan> DiscSpans(const std::string& sheet);
+
 // HuCards: a TurboGrafx-16 card dumped with its data lines reversed (bit 0 <-> bit 7 in every byte) doesn't start
 // as it is. Reports whether `rom` (the copier header already off) is one: its reset vector only points into the
 // first bank once reversed. FixReversedHuCard reverses it in place.

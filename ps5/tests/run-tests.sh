@@ -1135,6 +1135,11 @@ expect "$CHECK $T/dump/flip00300.ppm 960 540 green >/dev/null" "it runs (Cross -
 expect "[ -f '$T/root/states/PCEngine/Net Game (USA).state1' ] && [ ! -e '$T/share/states' ] && [ \$(find $T/share -type f | wc -l) = 1 ]" "its state is on the console, nothing is written to the share"
 expect "grep -q 'last_rom=/smb/10.0.0.5/games/PCEngine/Net Game (USA).pce' $T/root/pce-ps5.ini" "the shelf remembers it"
 nosan "$T"
+# a power cycle (pause menu, Down six times) starts the card again from memory: the share is not read again
+rc=$(PCEPS5_HOST_REALTIME=1 MAXFLIPS=900 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;150:$CROSS;152:0;$(SEQ 280 $L3R3 $DOWN $DOWN $DOWN $DOWN $DOWN $DOWN $CROSS);400:$CROSS;440:0;$(QUITAT 480)" "430")
+expect "[ $rc = 0 ] && grep -q 'power cycle: Net Game (USA).pce kept in memory, not read again' $T/root/logs/boot.log && [ \$(grep -c 'running \"Net Game (USA)\"' $T/root/logs/boot.log) = 2 ]" "a power cycle restarts the HuCard from memory, not from the share"
+expect "$CHECK $T/dump/flip00430.ppm 960 540 green >/dev/null" "and it runs (Cross -> green)"
+nosan "$T"
 # b. CD games on an NFS share, the System Card on the console. The stand-in card (make_test_rom.py cdplay) plays the
 # disc's track 2 in a loop: the core reads the disc through netfs while the game runs (netfs's blocks and read-ahead),
 # and the tones come out in tune (check_tone.py)
@@ -1147,20 +1152,33 @@ for kind in cue chd; do
 	rc=$(PCEPS5_HOST_AUDIO_DUMP=$T/audio.raw PCEPS5_HOST_REALTIME=1 MAXFLIPS=900 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;150:$CROSS;152:0;300:$CROSS;340:0;$(QUITAT 400)" "290,330")
 	expect "[ $rc = 0 ] && grep -q 'loading /nfs/10.0.0.5/export/pce/PCEngineCD/Tone (USA).$kind, System Card syscard3.pce' $T/root/logs/boot.log && grep -q 'running \"Tone (USA)\" (PC Engine CD)' $T/root/logs/boot.log" "$kind on a share: the disc starts as a PC Engine CD game"
 	expect "$CHECK $T/dump/flip00290.ppm 960 540 red >/dev/null && $CHECK $T/dump/flip00330.ppm 960 540 green >/dev/null" "$kind on a share: the System Card runs (red), the pad reaches it (green)"
+	expect "grep -q 'span(s) of the disc fetched ahead' $T/root/logs/boot.log && grep -q 'prefetch for a disc: .* bytes kept; the first: 2/2 block(s) here' $T/root/logs/boot.log" "$kind on a share: the start of the disc and of its tracks fetched before the game starts"
 	expect "$TONE $T/audio.raw >$T/tone.txt" "$kind on a share: the disc's music, read from the share while the game runs: 1000 Hz left, 1500 Hz right, in tune and clean"
 	sed 's/^/    /' $T/tone.txt
 	nosan "$T"
 done
-# the same with 200 ms on every read, as a slow link: the game waits for the block it seeks to (logged), then plays on
+# the same with 200 ms on every read, as a slow link: what was fetched ahead plays with no wait
 T=$(newroot t32slow)
 mkdir -p "$T/root/bios" "$T/share"
 $ROM "$T/root/bios/syscard3.pce" cdplay >/dev/null
 $CD "$T/share/Tone.cue" >/dev/null
 echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
 rc=$(PCEPS5_HOST_NETFS_DELAY_MS=200 PCEPS5_HOST_AUDIO_DUMP=$T/audio.raw PCEPS5_HOST_REALTIME=1 MAXFLIPS=1100 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;150:$CROSS;152:0;$(QUITAT 700)" "")
-expect "[ $rc = 0 ] && grep -q 'running \"Tone\" (PC Engine CD)' $T/root/logs/boot.log" "a slow link: the disc still starts"
-expect "grep -q 'smb://10.0.0.5/games: waited for Tone.bin in realtime (#1)' $T/root/logs/boot.log" "a slow link: the wait for the disc is logged"
-expect "$TONE $T/audio.raw >$T/tone.txt" "and the track still plays at its pitch (after a gap while it waited)"
+expect "[ $rc = 0 ] && grep -q 'running \"Tone\" (PC Engine CD)' $T/root/logs/boot.log" "a slow link (200 ms a read): the disc starts"
+expect "! grep -q 'waited for Tone.bin in realtime' $T/root/logs/boot.log" "and its track plays from what was fetched ahead: the game never waits for the share"
+expect "$TONE $T/audio.raw >$T/tone.txt" "in tune and clean"
+sed 's/^/    /' $T/tone.txt
+nosan "$T"
+# a slower link (2 s a read) and a 16 s track: the start of the disc is not all here when the game starts; the rest
+# comes in while the System Card boots and the music plays, in tune
+T=$(newroot t32slow2)
+mkdir -p "$T/root/bios" "$T/share"
+$ROM "$T/root/bios/syscard3.pce" cdplay >/dev/null
+$CD "$T/share/Tone.cue" --long >/dev/null
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(PCEPS5_HOST_NETFS_DELAY_MS=2000 PCEPS5_HOST_AUDIO_DUMP=$T/audio.raw PCEPS5_HOST_REALTIME=1 MAXFLIPS=1500 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;150:$CROSS;152:0;$(QUITAT 1200)" "")
+expect "[ $rc = 0 ] && grep -q 'running \"Tone\" (PC Engine CD)' $T/root/logs/boot.log && grep -q 'prefetch for a disc: .* the first: [01]/2 block(s) here' $T/root/logs/boot.log" "a slower link (2 s a read): the game starts before the start of its disc is all here"
+expect "$TONE $T/audio.raw >$T/tone.txt" "and the track plays at its pitch as the rest of it arrives"
 sed 's/^/    /' $T/tone.txt
 nosan "$T"
 # c. a share that does not connect: the shelf still works and says why

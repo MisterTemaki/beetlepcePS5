@@ -781,8 +781,9 @@ bool ArchiveSystem(const std::string& path, System* out, const std::atomic<bool>
 }
 
 // The CRC an archive stores for its ROM (a zip's and a 7z's directory both keep it), when the ROM has no copier header
-// to skip (its size has no 512 bit): true and the name inside; false when the data has to be read (a header, or a
-// TurboGrafx-16 dump that may be reversed: those are read once and their CRCs cached).
+// to skip (HuCardHeader): true and the name inside; false when the data has to be read (a header). RomCrc32 uses it
+// only when the game table knows it: a CRC it doesn't know may be a TurboGrafx-16 dump with its data lines reversed,
+// which is read once (and its CRCs cached) to be named as the same dump outside an archive is.
 bool StoredArchiveCrc(const std::string& path, std::string* inner, uint32_t* crc, const std::atomic<bool>* cancel = nullptr)
 {
 	if (ExtOf(path) == ".7z")
@@ -794,7 +795,7 @@ bool StoredArchiveCrc(const std::string& path, std::string* inner, uint32_t* crc
 		if (i < 0)
 			return false;
 		const sevenzip::Entry& e = a.Entries()[size_t(i)];
-		if (!e.has_crc || e.size == 0 || e.size > kMaxArchivedRom || (e.size & 0x3ff) == 0x200)
+		if (!e.has_crc || e.size == 0 || e.size > kMaxArchivedRom || HuCardHeader(size_t(e.size)) != 0)
 			return false;
 		*inner = e.name;
 		*crc = e.crc;
@@ -814,7 +815,7 @@ bool StoredArchiveCrc(const std::string& path, std::string* inner, uint32_t* crc
 		unz_file_info info;
 		ok = unzGetCurrentFileInfo(z, &info, nullptr, 0, nullptr, 0, nullptr, 0) == UNZ_OK &&
 			 info.uncompressed_size > 0 && info.uncompressed_size <= kMaxArchivedRom &&
-			 (info.uncompressed_size & 0x3ff) != 0x200;
+			 HuCardHeader(info.uncompressed_size) == 0;
 		if (ok)
 			*crc = uint32_t(info.crc);
 	}
@@ -861,7 +862,11 @@ bool ReadFromArchive(const std::string& path, std::string* inner, std::vector<ui
 	}
 	unzFile z = unzOpen(path.c_str());
 	if (!z)
+	{
+		if (why)
+			*why = "The file could not be read."; // a share that dropped, or not a zip at all
 		return false;
+	}
 	bool ok = FindInZip(z, [&](const std::string& name) {
 		if (!IsArchivedRom(name))
 			return false;
@@ -878,6 +883,12 @@ bool ReadFromArchive(const std::string& path, std::string* inner, std::vector<ui
 			data->resize(info.uncompressed_size);
 			ok = unzReadCurrentFile(z, data->data(), unsigned(data->size())) == int(data->size());
 			unzCloseCurrentFile(z);
+		}
+		if (!ok)
+		{
+			data->clear();
+			if (why)
+				*why = "The file could not be read."; // the HuCard is there, its data didn't come (or is damaged)
 		}
 	}
 	unzClose(z);
@@ -988,10 +999,11 @@ bool RomCrc32(const std::string& path, uint32_t* whole, uint32_t* body, std::str
 	System sys;
 	if (IsArchiveExt(ext))
 	{
-		// the zip (or 7z) keeps its ROM's CRC: read only when a 512-byte copier header has to come off for the body's
+		// the zip (or 7z) keeps its ROM's CRC: the archive is read only when a 512-byte copier header has to come off for
+		// the body's, or when the table doesn't know that CRC (a reversed dump is put right first, as outside an archive)
 		std::string inner;
 		uint32_t stored = 0;
-		if (StoredArchiveCrc(path, &inner, &stored, cancel))
+		if (StoredArchiveCrc(path, &inner, &stored, cancel) && !gamedb::ByCrc(System::Pce, stored, nullptr).empty())
 		{
 			if (inner_ext)
 				*inner_ext = ExtOf(inner);
@@ -1042,6 +1054,131 @@ bool RomCrc32(const std::string& path, uint32_t* whole, uint32_t* body, std::str
 		*body = Crc(data.data() + skip, data.size() - skip);
 	}
 	return true;
+}
+
+namespace
+{
+// "mm:ss:ff" -> frames (75 a second); -1 if it isn't one
+long Msf(const char* p)
+{
+	int m = 0, sec = 0, f = 0;
+	return sscanf(p, "%d:%d:%d", &m, &sec, &f) == 3 ? long(m) * 4500 + sec * 75 + f : -1;
+}
+
+std::string SheetName(const char*& p)
+{
+	while (*p == ' ' || *p == '\t')
+		p++;
+	std::string file;
+	if (*p == '"')
+	{
+		const char* q = strchr(p + 1, '"');
+		if (q)
+		{
+			file.assign(p + 1, q);
+			p = q + 1;
+		}
+	}
+	else
+	{
+		const char* e = p;
+		while (*e && *e != ' ' && *e != '\t' && *e != '\r' && *e != '\n')
+			e++;
+		file.assign(p, e);
+		p = e;
+	}
+	for (char& c : file)
+		if (c == '\\')
+			c = '/';
+	return file;
+}
+
+void DiscSpansOf(const std::string& sheet, std::vector<DiscSpan>& out, int depth)
+{
+	constexpr uint64_t kHead = 1 << 20; // two of netfs's blocks: a few seconds of a track, the reader ahead by then
+	const std::string dir = sheet.substr(0, sheet.find_last_of('/'));
+	const std::string ext = ExtOf(sheet);
+	auto add = [&](const std::string& file, uint64_t at) {
+		if (!file.empty())
+			out.push_back({file[0] == '/' ? file : dir + "/" + file, at, kHead});
+	};
+	if (ext == ".chd")
+	{
+		add(sheet.substr(sheet.find_last_of('/') + 1), 0);
+		return;
+	}
+	if (ext == ".ccd")
+	{
+		const std::string base = sheet.substr(0, sheet.size() - 4);
+		const std::string img = base.substr(base.find_last_of('/') + 1) + ".img";
+		add(img, 0);
+		add(base.substr(base.find_last_of('/') + 1) + ".sub", 0);
+		// each track's start: [TRACK n] ... INDEX 1=<lba>
+		if (FILE* f = fopen(sheet.c_str(), "r"))
+		{
+			char line[512];
+			while (fgets(line, sizeof line, f))
+			{
+				long lba = 0;
+				if (strncasecmp(line, "INDEX 1=", 8) == 0 && (lba = atol(line + 8)) > 0)
+					add(img, uint64_t(lba) * 2352);
+			}
+			fclose(f);
+		}
+		return;
+	}
+	if (ext != ".cue" && ext != ".toc" && ext != ".m3u")
+		return;
+	FILE* f = fopen(sheet.c_str(), "r");
+	if (!f)
+		return;
+	char line[1024];
+	std::string file;
+	unsigned sector = 2352;
+	while (fgets(line, sizeof line, f))
+	{
+		const char* p = line;
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (ext == ".m3u")
+		{
+			// the first disc is the one in the drive
+			std::string disc = p;
+			while (!disc.empty() && (disc.back() == '\n' || disc.back() == '\r' || disc.back() == ' '))
+				disc.pop_back();
+			if (disc.empty() || disc[0] == '#')
+				continue;
+			if (depth < 2)
+				DiscSpansOf(disc[0] == '/' ? disc : dir + "/" + disc, out, depth + 1);
+			break;
+		}
+		if (strncasecmp(p, "FILE", 4) == 0 || strncasecmp(p, "DATAFILE", 8) == 0)
+		{
+			p += toupper(uint8_t(p[0])) == 'F' ? 4 : 8;
+			file = SheetName(p);
+			add(file, 0);
+		}
+		else if (strncasecmp(p, "TRACK", 5) == 0)
+		{
+			// TRACK 02 AUDIO, TRACK 01 MODE1/2048: the size of the file's sectors
+			sector = strstr(p, "/2048") ? 2048 : strstr(p, "/2336") ? 2336 : 2352;
+		}
+		else if (strncasecmp(p, "INDEX 01", 8) == 0 && !file.empty())
+		{
+			const long at = Msf(p + 8 + strspn(p + 8, " \t"));
+			if (at > 0)
+				add(file, uint64_t(at) * sector);
+		}
+	}
+	fclose(f);
+}
+} // namespace
+
+std::vector<DiscSpan> DiscSpans(const std::string& sheet)
+{
+	std::vector<DiscSpan> out;
+	DiscSpansOf(sheet, out, 0);
+	return out;
 }
 
 void PrepareFolders()
