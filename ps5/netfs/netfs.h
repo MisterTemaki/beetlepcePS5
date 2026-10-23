@@ -135,9 +135,9 @@ private:
 // Does nothing for other paths and for a share that is not ready.
 void netfs_prepare_game(const std::string& rom_path, int head_wait_ms = 3000);
 // Before a disc game on a share starts (its .cue's tracks, a .chd...): the blocks that hold each span (path, offset,
-// length) are fetched in the background, in the order given, and kept in memory until netfs_end_game, so the
-// emulation thread does not wait for them when the game seeks there (the boot, each track's start). Spans past
-// `budget` bytes are left out. Waits for the first span up to first_wait_ms (the rest keep arriving while the game
+// length) are fetched in the background, in the order given (after any read-ahead of the running game), and kept in
+// memory until netfs_end_game, so the emulation thread does not wait for them when the game seeks there (the boot,
+// each track's start). Spans past `budget` bytes are left out (a block two spans share counts once). Waits for the first span up to first_wait_ms (the rest keep arriving while the game
 // starts). Paths that are not on a ready share are skipped. Returns the bytes kept.
 struct NetfsSpan
 {

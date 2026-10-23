@@ -1135,6 +1135,14 @@ void DiscSpansOf(const std::string& sheet, std::vector<DiscSpan>& out, int depth
 	char line[1024];
 	std::string file;
 	unsigned sector = 2352;
+	// Where a track starts in its file: an INDEX's time counts sectors from the start of the file, and each stretch
+	// between two INDEX lines has the sector size of the track the first one is in (one .bin can mix MODE1/2048 and
+	// 2352-byte tracks). Only a BINARY (or MOTOROLA) file is laid out that way: in a WAVE/OGG/MP3/FLAC... file the
+	// offset of a time isn't known, so only its start is fetched.
+	bool raw = false, have_point = false;
+	long point_at = 0;
+	uint64_t point_bytes = 0;
+	unsigned point_sector = 2352;
 	while (fgets(line, sizeof line, f))
 	{
 		const char* p = line;
@@ -1157,17 +1165,35 @@ void DiscSpansOf(const std::string& sheet, std::vector<DiscSpan>& out, int depth
 			p += toupper(uint8_t(p[0])) == 'F' ? 4 : 8;
 			file = SheetName(p);
 			add(file, 0);
+			while (*p == ' ' || *p == '\t')
+				p++;
+			const std::string fext = ExtOf(file);
+			raw = strncasecmp(p, "BINARY", 6) == 0 || strncasecmp(p, "MOTOROLA", 8) == 0 ||
+				  (!isalpha(uint8_t(*p)) && fext != ".wav" && fext != ".ogg" && fext != ".mp3" && fext != ".flac" &&
+					  fext != ".aiff" && fext != ".aif" && fext != ".opus");
+			have_point = false;
 		}
 		else if (strncasecmp(p, "TRACK", 5) == 0)
 		{
 			// TRACK 02 AUDIO, TRACK 01 MODE1/2048: the size of the file's sectors
 			sector = strstr(p, "/2048") ? 2048 : strstr(p, "/2336") ? 2336 : 2352;
 		}
-		else if (strncasecmp(p, "INDEX 01", 8) == 0 && !file.empty())
+		else if (strncasecmp(p, "INDEX", 5) == 0 && (p[5] == ' ' || p[5] == '\t') && !file.empty() && raw)
 		{
-			const long at = Msf(p + 8 + strspn(p + 8, " \t"));
-			if (at > 0)
-				add(file, uint64_t(at) * sector);
+			// INDEX nn mm:ss:ff (00: a pregap inside the file, 01: where the track starts)
+			const char* q = p + 5 + strspn(p + 5, " \t");
+			const int index = atoi(q);
+			q += strspn(q, "0123456789");
+			const long at = Msf(q + strspn(q, " \t"));
+			if (at < 0 || (have_point && at < point_at))
+				continue;
+			const uint64_t bytes = have_point ? point_bytes + uint64_t(at - point_at) * point_sector : uint64_t(at) * sector;
+			have_point = true;
+			point_at = at;
+			point_bytes = bytes;
+			point_sector = sector;
+			if (index == 1 && bytes > 0)
+				add(file, bytes);
 		}
 	}
 	fclose(f);

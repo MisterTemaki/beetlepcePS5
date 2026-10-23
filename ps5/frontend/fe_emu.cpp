@@ -995,7 +995,11 @@ bool LoadGame(const std::string& path, std::string* error)
 			// disc is waited for (3 s at most), the rest arrives while the System Card boots
 			std::vector<NetfsSpan> spans;
 			for (const fe::DiscSpan& d : fe::DiscSpans(path))
+			{
 				spans.push_back({d.path, d.offset, d.length});
+				OrbisLog("[emu]   ahead: %s at %llu", d.path.substr(d.path.find_last_of('/') + 1).c_str(),
+					(unsigned long long)d.offset);
+			}
 			const uint64_t kept = netfs_prefetch(spans, 3000, 64ull << 20);
 			OrbisLog("[emu] %s: %zu span(s) of the disc fetched ahead, %llu KiB kept", file.c_str(), spans.size(),
 				(unsigned long long)(kept >> 10));

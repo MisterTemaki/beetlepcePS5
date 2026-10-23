@@ -5,7 +5,8 @@
 //    parent's listing, and a name missing from a fresh listing is ENOENT with no round trip;
 //  - the files being read, as 512 KiB blocks (.pcm audio: 128 KiB). A file of 16 MiB or less is fetched whole once
 //    two blocks have been read in order; a bigger one keeps a window around the reader. A worker thread fetches
-//    the blocks that are queued: read-ahead and the MSU-1 prefetch.
+//    the blocks that are queued: the running game's read-ahead first, then the prefetch (MSU-1 files, a disc's
+//    spans), so a long prefetch backlog on a slow link never holds up what the game reads next.
 //
 // While a game runs (netfs_realtime) nothing here waits on the network for the emulation thread, with the one
 // exception the plan allows: a miss inside an MSU-1 data file waits for its block. See network-shares-spec.md,
@@ -50,7 +51,8 @@ struct Block
 	State st = Absent;
 	int err = 0;
 	bool pinned = false; // stays while the game runs
-	bool queued = false; // a worker request for it is waiting
+	bool queued = false;  // a worker request for it is waiting
+	bool urgent = false;  // ... and one of them is in the read-ahead queue
 	std::vector<uint8_t> data;
 };
 
@@ -73,12 +75,15 @@ public:
 
 	bool BlockReady(size_t b);
 	size_t BlockCount() const { return m_blocks.size(); }
-	// Keeps the block through the game and queues it for the worker if it is not here.
-	void Pin(size_t b);
+	// Keeps the block through the game and queues it for the worker (the prefetch queue) if it is not here.
+	// Returns false when it was kept already (or is past the end).
+	bool Pin(size_t b);
+	bool Pinned(size_t b);
 	// Waits (real time) until block b is Ready or Failed or timeout_ms passed; returns its state then.
 	Block::State WaitBlock(size_t b, int timeout_ms);
-	// Queues a block for the worker (no-op when it is here or on its way).
-	void Queue(size_t b);
+	// Queues a block for the worker (no-op when it is here or on its way). `urgent`: the game's read-ahead, fetched
+	// before the prefetch (a block already waiting in the prefetch queue is queued again there).
+	void Queue(size_t b, bool urgent = false);
 	// Worker side: fetches block b if nobody has it yet.
 	void FetchIfAbsent(size_t b);
 	// The loop point of an MSU-1 track, from its head: pins and queues the block that holds it.
@@ -91,7 +96,7 @@ private:
 	size_t BlockLen(size_t b) const;
 	void NoteAccess(size_t b); // m_mu held
 	void Evict(size_t around); // m_mu held
-	void QueueLocked(size_t b); // m_mu held
+	void QueueLocked(size_t b, bool urgent); // m_mu held
 
 	Share& m_share;
 	Cache& m_cache;
@@ -139,7 +144,8 @@ public:
 		uint64_t budget);
 	void EndGame(); // lets go of what the game kept
 
-	void Enqueue(const std::shared_ptr<FileData>& f, size_t block);
+	// `urgent`: the read-ahead queue, which the worker empties before it takes the next prefetch block.
+	void Enqueue(const std::shared_ptr<FileData>& f, size_t block, bool urgent);
 	void CloseLater(Handle h);
 	void Stop(); // ends the worker thread; closes queued handles first
 	void WaitIdle(); // tests: returns when the worker has nothing queued and nothing running
@@ -173,7 +179,8 @@ private:
 
 	std::mutex m_qmu;
 	std::condition_variable m_qcv;
-	std::deque<Req> m_queue;
+	std::deque<Req> m_urgent; // the game's read-ahead
+	std::deque<Req> m_queue;  // the prefetch
 	std::vector<Handle> m_closing;
 	std::condition_variable m_idle_cv;
 	bool m_busy = false; // the worker took a request or handles and has not finished them

@@ -304,6 +304,11 @@ expect "! grep -q 'GET .*Blazing%20Lazers' $T/root/logs/boot.log" "your own cove
 expect "$CHECK $T/dump/flip00170.ppm 960 420 255 0 255 >/dev/null" "Dracula X shows the CD (magenta) cover"
 expect "$CHECK $T/dump/flip00220.ppm 960 420 0 0 255 >/dev/null" "Blazing Lazers shows your own (blue) cover, not the server's"
 expect "! $CHECK $T/dump/flip00270.ppm 960 420 255 0 0 >/dev/null 2>&1 && ! $CHECK $T/dump/flip00270.ppm 960 420 0 255 0 >/dev/null 2>&1" "no cover online: a placeholder card"
+# 1.1.1 (genplusgxPS5 issue #4): the card's emblem, top right, is the PC Engine pad's two round buttons (II, I) on a
+# light plate, no longer the SNES pad's four coloured buttons (red, yellow, green, blue: sampled where they were)
+P=$T/dump/flip00270.ppm
+expect "! $CHECK $P 1201 227 225 60 70 40 >/dev/null && ! $CHECK $P 1238 195 240 200 60 40 >/dev/null && ! $CHECK $P 1275 227 70 180 90 40 >/dev/null && ! $CHECK $P 1238 258 70 110 230 40 >/dev/null" "the placeholder card no longer shows the SNES pad's four coloured buttons"
+expect "$CHECK $P 1201 227 36 36 44 12 >/dev/null && $CHECK $P 1275 227 36 36 44 12 >/dev/null && $CHECK $P 1238 195 200 200 212 16 >/dev/null && $CHECK $P 1238 227 200 200 212 16 >/dev/null" "it shows the PC Engine pad's two round buttons (II, I) on their plate"
 expect "$CHECK $T/dump/flip00320.ppm 960 420 255 0 0 >/dev/null" "R-Type shows the downloaded (red) cover"
 expect "$CHECK $T/dump/flip00370.ppm 960 420 0 255 0 >/dev/null" "Splatterhouse shows the linked (green) cover"
 nosan "$T"
@@ -1180,6 +1185,19 @@ rc=$(PCEPS5_HOST_NETFS_DELAY_MS=2000 PCEPS5_HOST_AUDIO_DUMP=$T/audio.raw PCEPS5_
 expect "[ $rc = 0 ] && grep -q 'running \"Tone\" (PC Engine CD)' $T/root/logs/boot.log && grep -q 'prefetch for a disc: .* the first: [01]/2 block(s) here' $T/root/logs/boot.log" "a slower link (2 s a read): the game starts before the start of its disc is all here"
 expect "$TONE $T/audio.raw >$T/tone.txt" "and the track plays at its pitch as the rest of it arrives"
 sed 's/^/    /' $T/tone.txt
+nosan "$T"
+# 1.1.1: where a .cue's tracks start, for the prefetch: each stretch between two INDEX lines has the sector size of its
+# own track (one .bin mixing a 2048-byte data track with audio tracks), and in an .ogg (not laid out in sectors) only
+# its start is fetched. Only the log is read: the disc itself is not a real one
+T=$(newroot t32cue)
+mkdir -p "$T/root/bios" "$T/share"
+$ROM "$T/root/bios/syscard3.pce" cdplay >/dev/null
+head -c $((1700 * 2352)) /dev/zero >"$T/share/Mixed.bin"
+printf 'FILE "Mixed.bin" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    INDEX 00 00:10:00\n    INDEX 01 00:12:00\n  TRACK 03 AUDIO\n    INDEX 01 00:20:00\nFILE "Mixed-04.ogg" OGG\n  TRACK 04 AUDIO\n    INDEX 00 00:00:00\n    INDEX 01 00:02:00\n' >"$T/share/Mixed.cue"
+echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+rc=$(PCEPS5_HOST_REALTIME=1 MAXFLIPS=400 PCEPS5_HOST_NETFS_DIR="$T/share" run "$T" "0:0;150:$CROSS;152:0" "")
+expect "grep -q 'ahead: Mixed.bin at 0$' $T/root/logs/boot.log && grep -q 'ahead: Mixed.bin at 1888800$' $T/root/logs/boot.log && grep -q 'ahead: Mixed.bin at 3300000$' $T/root/logs/boot.log && [ \$(grep -c 'ahead: Mixed.bin at' $T/root/logs/boot.log) = 3 ]" "a .bin mixing 2048- and 2352-byte tracks: its tracks' starts at the right bytes (750 x 2048 + 150 x 2352, + 600 x 2352)"
+expect "grep -q 'ahead: Mixed-04.ogg at 0$' $T/root/logs/boot.log && [ \$(grep -c 'ahead: Mixed-04.ogg at' $T/root/logs/boot.log) = 1 ]" "an .ogg track: only its start"
 nosan "$T"
 # c. a share that does not connect: the shelf still works and says why
 T=$(newroot t32f)

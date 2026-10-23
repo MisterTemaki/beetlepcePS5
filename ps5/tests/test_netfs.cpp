@@ -1258,6 +1258,71 @@ static void TestMsu1Oversize()
 	netfs_end_game();
 }
 
+// 1.1.1: a disc's prefetch. Blocks that two spans share are counted once against the budget, and the running game's
+// read-ahead goes before the prefetch backlog on the one worker (a slow link must not hold up what the game reads
+// next behind up to 64 MiB of a disc).
+static void TestPrefetch()
+{
+	Rig rig("smb://192.168.1.50/games/snes\n");
+	FakeServer& s = *rig.srv[0];
+	const std::string disc = Blob(12 * 1024 * 1024, 41), track = Blob(4 * 1024 * 1024, 42);
+	s.Put("cd/Disc.bin", disc);
+	s.Put("cd/Track.bin", track);
+	rig.Mount();
+	const std::string base = std::string(kBase) + "/cd/";
+	const uint64_t MiB = 1 << 20;
+
+	uint64_t kept = netfs_prefetch({{base + "Disc.bin", 0, MiB}, {base + "Disc.bin", 0, MiB}, {base + "Disc.bin", MiB, MiB}}, 0, 64 * MiB);
+	CHECK(kept == 2 * MiB, "blocks two spans share are counted once");
+	kept = netfs_prefetch({{base + "Disc.bin", 0, 2 * MiB}, {base + "Disc.bin", 4 * MiB, MiB}}, 0, MiB);
+	CHECK(kept == MiB, "blocks kept already take nothing from the budget");
+	netfs_cache_wait_idle();
+	netfs_end_game();
+
+	// the game has blocks 1 and 0 of a track (not in order: no read-ahead yet)
+	const int fd = open((base + "Track.bin").c_str(), O_RDONLY);
+	char b[64];
+	CHECK(fd >= 0 && pread(fd, b, sizeof b, kBlockSize + 5) == (ssize_t)sizeof b && pread(fd, b, sizeof b, 5) == (ssize_t)sizeof b &&
+			  memcmp(b, track.data() + 5, sizeof b) == 0,
+		"a track's first two blocks are read");
+	netfs_cache_wait_idle();
+	{
+		std::lock_guard<std::mutex> lk(s.mu);
+		s.read_log.clear();
+	}
+	// a slow link: the prefetch of 8 MiB of the disc queued, its first block on the wire
+	s.gate = true;
+	kept = netfs_prefetch({{base + "Disc.bin", 0, 8 * MiB}}, 0, 64 * MiB);
+	s.WaitGated(1);
+	// the game reads on: block 1 after block 0 starts the track's read-ahead (the rest of it)
+	CHECK(pread(fd, b, sizeof b, kBlockSize + 9) == (ssize_t)sizeof b && memcmp(b, track.data() + kBlockSize + 9, sizeof b) == 0,
+		"the game reads on from memory while the link is busy");
+	s.Release();
+	netfs_cache_wait_idle();
+	size_t disc_second = SIZE_MAX, track_last = 0, track_reads = 0;
+	{
+		std::lock_guard<std::mutex> lk(s.mu);
+		for (size_t i = 0; i < s.read_log.size(); i++)
+		{
+			const auto& r = s.read_log[i];
+			if (r.first == "cd/Disc.bin" && r.second == kBlockSize && disc_second == SIZE_MAX)
+				disc_second = i;
+			if (r.first == "cd/Track.bin")
+			{
+				track_last = i;
+				track_reads++;
+			}
+		}
+	}
+	CHECK(kept == 8 * MiB && track_reads > 0 && disc_second != SIZE_MAX && track_last < disc_second,
+		"the track's read-ahead is fetched before the rest of the disc's prefetch");
+	CHECK(fd >= 0 && pread(fd, b, sizeof b, 7 * kBlockSize + 1) == (ssize_t)sizeof b && memcmp(b, track.data() + 7 * kBlockSize + 1, sizeof b) == 0,
+		"and reads back right");
+	if (fd >= 0)
+		close(fd);
+	netfs_end_game();
+}
+
 int main()
 {
 	TestParse();
@@ -1282,6 +1347,7 @@ int main()
 	TestRealtime();
 	TestMsu1();
 	TestMsu1Oversize();
+	TestPrefetch();
 	printf("netfs: passed %d, failed %d\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;
 }

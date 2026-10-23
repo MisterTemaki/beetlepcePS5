@@ -42,6 +42,7 @@ struct FakeServer
 	std::atomic<int> connects{0}, stats{0}, lists{0}, opens{0}, reads{0}, closes{0};
 	std::atomic<uint64_t> bytes_read{0};
 	std::atomic<int> waiting{0}; // calls parked by `hang`
+	std::vector<std::pair<std::string, uint64_t>> read_log; // every Pread that got data: path, offset (under mu)
 
 	FakeServer() { dirs.insert(""); }
 
@@ -185,6 +186,7 @@ public:
 		n = std::min<size_t>(n, 300 * 1024); // short reads: netfs must ask again
 		memcpy(buf, data.data() + offset, n);
 		m_s->bytes_read += n;
+		m_s->read_log.push_back({((OpenRec*)h)->path, offset});
 		return (int64_t)n;
 	}
 

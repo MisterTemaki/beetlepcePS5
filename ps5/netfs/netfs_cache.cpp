@@ -114,20 +114,20 @@ int FileData::Fetch(size_t b)
 	return err;
 }
 
-void FileData::QueueLocked(size_t b)
+void FileData::QueueLocked(size_t b, bool urgent)
 {
 	Block& blk = m_blocks[b];
-	if (blk.st == Block::Absent && !blk.queued)
-	{
-		blk.queued = true;
-		m_cache.Enqueue(shared_from_this(), b);
-	}
+	if (blk.st != Block::Absent || blk.urgent || (blk.queued && !urgent))
+		return;
+	blk.queued = true;
+	blk.urgent = urgent;
+	m_cache.Enqueue(shared_from_this(), b, urgent);
 }
 
-void FileData::Queue(size_t b)
+void FileData::Queue(size_t b, bool urgent)
 {
 	std::lock_guard<std::mutex> lk(m_mu);
-	QueueLocked(b);
+	QueueLocked(b, urgent);
 }
 
 void FileData::FetchIfAbsent(size_t b)
@@ -135,9 +135,9 @@ void FileData::FetchIfAbsent(size_t b)
 	{
 		std::lock_guard<std::mutex> lk(m_mu);
 		Block& blk = m_blocks[b];
-		blk.queued = false;
 		if (blk.st != Block::Absent)
-			return;
+			return; // fetched already (a block queued in both queues comes here twice)
+		blk.queued = blk.urgent = false;
 		blk.st = Block::Loading;
 	}
 	Fetch(b);
@@ -154,7 +154,7 @@ void FileData::Evict(size_t around)
 		{
 			std::vector<uint8_t>().swap(k.data);
 			k.st = Block::Absent;
-			k.queued = false;
+			k.queued = k.urgent = false;
 			it = m_resident.erase(it);
 		}
 		else
@@ -178,14 +178,14 @@ void FileData::NoteAccess(size_t b)
 			{
 				m_queued_all = true;
 				for (size_t c = b + 1; c < m_blocks.size(); c++)
-					QueueLocked(c);
+					QueueLocked(c, true);
 			}
 		}
 		else
 		{
 			const size_t ahead = pcm ? 32 : 8;
 			for (size_t c = b + 1; c <= b + ahead && c < m_blocks.size(); c++)
-				QueueLocked(c);
+				QueueLocked(c, true);
 		}
 	}
 	if (!whole)
@@ -223,7 +223,7 @@ int64_t FileData::ReadAt(uint64_t off, void* dst, size_t len)
 			// Silence for the whole rest of the span, never a short read (the core would end the track).
 			memset(out + done, 0, len - done);
 			done = len;
-			QueueLocked(b);
+			QueueLocked(b, true);
 			uint64_t n = ++m_cache.stats.underruns;
 			if (n == 1 || n % 100 == 0)
 				note = m_share.label + ": audio underrun #" + std::to_string(n) + " in " + rel;
@@ -242,7 +242,7 @@ int64_t FileData::ReadAt(uint64_t off, void* dst, size_t len)
 			continue;
 		}
 		blk.st = Block::Loading; // Absent, or Failed once: fetch it here
-		blk.queued = false;
+		blk.queued = blk.urgent = false;
 		lk.unlock();
 		int err = Fetch(b);
 		lk.lock();
@@ -265,13 +265,20 @@ bool FileData::BlockReady(size_t b)
 	return b < m_blocks.size() && m_blocks[b].st == Block::Ready;
 }
 
-void FileData::Pin(size_t b)
+bool FileData::Pin(size_t b)
 {
 	std::lock_guard<std::mutex> lk(m_mu);
-	if (b >= m_blocks.size())
-		return;
+	if (b >= m_blocks.size() || m_blocks[b].pinned)
+		return false;
 	m_blocks[b].pinned = true;
-	QueueLocked(b);
+	QueueLocked(b, false);
+	return true;
+}
+
+bool FileData::Pinned(size_t b)
+{
+	std::lock_guard<std::mutex> lk(m_mu);
+	return b < m_blocks.size() && m_blocks[b].pinned;
 }
 
 void FileData::Unpin()
@@ -302,7 +309,7 @@ void FileData::PinLoopPoint()
 		return;
 	size_t b = (size_t)(at / block_size);
 	m_blocks[b].pinned = true;
-	QueueLocked(b);
+	QueueLocked(b, false);
 }
 
 // ---------------------------------------------------------------- Cache
@@ -566,10 +573,15 @@ uint64_t Cache::Prefetch(const std::vector<std::pair<std::string, std::pair<uint
 		bool any = false;
 		for (size_t b = from; b <= to && b < f->BlockCount(); b++)
 		{
+			if (f->Pinned(b)) // kept already (spans of one file can share a block): no more bytes
+			{
+				any = true;
+				continue;
+			}
 			if (kept_bytes + f->block_size > budget)
 				break;
-			kept_bytes += f->block_size;
-			f->Pin(b);
+			if (f->Pin(b))
+				kept_bytes += f->block_size;
 			any = true;
 		}
 		if (!any)
@@ -622,7 +634,7 @@ void Cache::EnsureWorker()
 	m_worker = ps5::BigThread([this] { WorkerLoop(); }, 256 * 1024);
 }
 
-void Cache::Enqueue(const std::shared_ptr<FileData>& f, size_t block)
+void Cache::Enqueue(const std::shared_ptr<FileData>& f, size_t block, bool urgent)
 {
 	{
 		std::lock_guard<std::mutex> lk(m_qmu);
@@ -631,7 +643,7 @@ void Cache::Enqueue(const std::shared_ptr<FileData>& f, size_t block)
 		Req r;
 		r.file = f;
 		r.block = block;
-		m_queue.push_back(r);
+		(urgent ? m_urgent : m_queue).push_back(r);
 	}
 	EnsureWorker();
 	m_qcv.notify_one();
@@ -665,13 +677,15 @@ void Cache::WorkerLoop()
 		std::vector<Handle> closing;
 		{
 			std::unique_lock<std::mutex> lk(m_qmu);
-			m_qcv.wait(lk, [&] { return m_stop || !m_queue.empty() || !m_closing.empty(); });
+			m_qcv.wait(lk, [&] { return m_stop || !m_urgent.empty() || !m_queue.empty() || !m_closing.empty(); });
 			closing.swap(m_closing);
 			stop = m_stop;
-			if (!stop && !m_queue.empty())
+			// the game's read-ahead before the prefetch backlog
+			std::deque<Req>& q = m_urgent.empty() ? m_queue : m_urgent;
+			if (!stop && !q.empty())
 			{
-				r = m_queue.front();
-				m_queue.pop_front();
+				r = q.front();
+				q.pop_front();
 				have = true;
 			}
 			m_busy = have || !closing.empty();
@@ -694,7 +708,7 @@ void Cache::WorkerLoop()
 void Cache::WaitIdle()
 {
 	std::unique_lock<std::mutex> lk(m_qmu);
-	m_idle_cv.wait(lk, [&] { return m_stop || (m_queue.empty() && m_closing.empty() && !m_busy); });
+	m_idle_cv.wait(lk, [&] { return m_stop || (m_urgent.empty() && m_queue.empty() && m_closing.empty() && !m_busy); });
 }
 
 void Cache::Stop()
@@ -702,6 +716,7 @@ void Cache::Stop()
 	{
 		std::lock_guard<std::mutex> lk(m_qmu);
 		m_stop = true;
+		m_urgent.clear();
 		m_queue.clear();
 	}
 	m_qcv.notify_all();

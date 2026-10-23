@@ -237,14 +237,36 @@ std::shared_ptr<CoverTex> Placeholder(const GameInfo& g)
 			px[size_t(y) * w + i] = edge;
 			px[size_t(y) * w + w - 1 - i] = edge;
 		}
-	// four coloured buttons, top right
-	const uint32_t dots[4] = {Pack(225, 60, 70), Pack(240, 200, 60), Pack(70, 180, 90), Pack(70, 110, 230)};
-	const int cx[4] = {w - 130, w - 95, w - 60, w - 95}, cy[4] = {80, 50, 80, 110};
-	for (int k = 0; k < 4; k++)
-		for (int y = -14; y <= 14; y++)
-			for (int x = -14; x <= 14; x++)
-				if (x * x + y * y <= 196)
-					px[size_t(cy[k] + y) * w + cx[k] + x] = dots[k];
+	// top right, the system's pad in brief: its two round buttons (II and I) side by side, two small ones beside them,
+	// on a light rounded plate (plain shapes in neutral colours)
+	{
+		const int top = 50, bottom = 110, left = w - 215, right = w - 35, r = (bottom - top) / 2, my = top + r;
+		const uint32_t plate = Pack(200, 200, 212), rim = Pack(120, 120, 136), button = Pack(36, 36, 44),
+					   shine = Pack(92, 92, 108);
+		auto disc = [&](int cx, int cy, int rad, uint32_t c) {
+			for (int y = -rad; y <= rad; y++)
+				for (int x = -rad; x <= rad; x++)
+					if (x * x + y * y <= rad * rad)
+						px[size_t(cy + y) * w + cx + x] = c;
+		};
+		for (int y = top; y <= bottom; y++)
+			for (int x = left; x <= right; x++)
+			{
+				const int dx = x < left + r ? left + r - x : x > right - r ? x - (right - r) : 0, dy = y - my;
+				if (dx * dx + dy * dy <= r * r)
+					px[size_t(y) * w + x] = plate;
+			}
+		for (int cx : {w - 190, w - 168}) // two small pill buttons
+			for (int k = -5; k <= 5; k++)
+				disc(cx + k, my + 1, 4, rim);
+		const int bx[2] = {w - 130, w - 72}; // II, I
+		for (int k = 0; k < 2; k++)
+		{
+			disc(bx[k], my, 21, rim);
+			disc(bx[k], my, 18, button);
+			disc(bx[k] - 6, my - 6, 4, shine);
+		}
+	}
 
 	Canvas canvas{px.data(), w, h, w};
 	// the title, word-wrapped, up to 4 lines

@@ -35,12 +35,12 @@ Everything outside `ps5/` is Beetle PCE's source (the original README is
 [README-Beetle-PCE.md](README-Beetle-PCE.md)), with a few changes listed in [The core](#the-core). The frontend
 drives the core through its libretro interface and plays the part RetroArch plays on a PC.
 
-> **Status (1.1):** builds with the ps5-payload-dev SDK into a signed native app, and passes 424 host tests, which
+> **Status (1.1.1):** builds with the ps5-payload-dev SDK into a signed native app, and passes 429 host tests, which
 > run the same code (the Beetle PCE core included) on Linux with the PS5 calls simulated: a test HuCard (made by
 > `ps5/tests/make_test_rom.py`) is played through the whole chain -- the shelf, the pad, the core, the video and
 > sound output -- as a PC Engine card, a SuperGrafx card, a card with a copier header, a reversed TurboGrafx-16
 > dump, from a `.zip` and a `.7z`, and as the System Card of a CD game; games are played from a network share
-> standing in for a NAS (a CD's music streamed from it while the game runs). netfs's own 229 checks, the NFS
+> standing in for a NAS (a CD's music streamed from it while the game runs). netfs's own 235 checks, the NFS
 > backend's and the 7z reader's 43 pass too. **It has not been run on a PS5 yet** (nor have network shares or
 > `.7z` archives), and no commercial game has been tried with this port: please report what works and what
 > doesn't. If something fails, the logs in `/data/pce/logs/` say where.
@@ -104,9 +104,15 @@ next to Genesis Plus GX PS5 (PPSA99921, helper port 9088), Snes9x PS5 (PPSA99922
 
 ## Versions
 
-Every release carries its version in the file name: `BeetlePCEPS5-v1.1.elf` and `pce-ps5-v1.1-src.zip`
+Every release carries its version in the file name: `BeetlePCEPS5-v1.1.1.elf` and `pce-ps5-v1.1.1-src.zip`
 (`make dist`). When updating, replace the old ELF with the new one in your autoload or Payload Manager. In this
 README, "`BeetlePCEPS5.elf`" always means the current release's ELF.
+
+**1.1.1:** a game with no cover gets a card with a PC Engine pad's two round buttons (II, I) on it, no longer the
+SNES pad's four coloured buttons (thanks to CroCop86,
+[issue #4](https://github.com/MisterTemaki/genplusgxPS5/issues/4)). Games on a share: the running game's read-ahead
+goes before a CD's prefetch on a slow link, a `.cue` whose `.bin` mixes 2048- and 2352-byte tracks has its tracks'
+starts fetched ahead at the right places, and a socket's non-blocking switch stays in step with the console's.
 
 **1.1:** network shares and 7-Zip archives, as Genesis Plus GX PS5 has them (thanks to CroCop86 for asking,
 [issue #3](https://github.com/MisterTemaki/genplusgxPS5/issues/3)).
@@ -171,10 +177,10 @@ PC Engine's button names, the System Cards' and the shaders' names are not trans
 
 1. **Send `BeetlePCEPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < BeetlePCEPS5-v1.1.elf
+   nc -q0 PS5_IP 9021 < BeetlePCEPS5-v1.1.1.elf
    ```
    It installs the app in `/data/homebrew/PPSA99925/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the
-   icon and the backgrounds), shows **"Beetle PCE PS5 1.1 installed. Open it from the Beetle PCE PS5 icon on the
+   icon and the backgrounds), shows **"Beetle PCE PS5 1.1.1 installed. Open it from the Beetle PCE PS5 icon on the
    home screen."** and stays running as the helper.
 2. **Open the Beetle PCE PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your games** to their system's folder, over FTP for example. The app makes the folders on its first
@@ -363,11 +369,12 @@ Use the server's IP address. Inside a user name, password or folder, write `& = 
   listings and connects the shares that were down once more. The system folders work there too (`PCEngine/`,
   `SuperGrafx/`, `PCEngineCD/`), and Up / Down pick a system inside the tab.
 - Network games are first named from their file names; a background pass then reads each HuCard once to name it by
-  checksum (a `.zip` or `.7z`: only its directory, which also says its system), and the answer is remembered in
-  `covers/crc-cache.txt`. A cover for a game named late is fetched when it is. Until an archive on a share has been
-  looked into, its folder's name gives its system (`SuperGrafx/`), else it is listed with the PC Engine games. A
-  file that could not be read (a link that dropped) is tried again at the next visit of the shelf, never
-  remembered as unreadable.
+  checksum (a `.zip` or `.7z`: its directory, which says its system and keeps the card's CRC; the card is unpacked
+  once only when that CRC is not in the game table, a reversed TurboGrafx-16 dump for one, or when the card has a
+  copier header), and the answer is remembered in `covers/crc-cache.txt`. A cover for a game named late is fetched
+  when it is. Until an archive on a share has been looked into, its folder's name gives its system (`SuperGrafx/`),
+  else it is listed with the PC Engine games. A file that could not be read (a link that dropped) is tried again at
+  the next visit of the shelf, never remembered as unreadable.
 - A share is read-only. Saves, states, the backup RAM, covers and settings stay on the console, and so do the
   System Cards (`/data/pce/bios`).
 - **HuCards** are read into memory when they start. **CD games** (`.cue` with its tracks -- `.bin`, `.iso`, `.wav`,
@@ -608,7 +615,7 @@ make ps5 -j$(nproc)              # build/ps5/BeetlePCEPS5.elf (installer + helpe
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/BeetlePCEPS5-v<version>.elf, the release zip, the source zip
 make app                         # only build/app/PPSA99925/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + 424 host tests (ASan/UBSan), with netfs's,
+make test                        # Linux builds (app, installer, helper) + 429 host tests (ASan/UBSan), with netfs's,
                                  # the NFS backend's, the tabs' and the 7z reader's unit tests (and the SMB backend's
                                  # against a real Samba, skipped without smbd and pdbedit)
 make bench                       # the core alone, -O3 for Zen 2: build/bench/pce-bench <card.pce> [frames]

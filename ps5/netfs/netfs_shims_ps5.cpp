@@ -3,7 +3,8 @@
 //
 //  - fcntl(fd, F_SETFL/F_GETFL) on a socket: the console's own fcntl first (it works in SwanStationPS5's libnfs on
 //    a console); if it refuses, setsockopt(SO_NBIO), the console's own switch, and getsockopt to read it back (also
-//    when F_GETFL works: O_NONBLOCK is added when SO_NBIO is on).
+//    when F_GETFL works: O_NONBLOCK is added when SO_NBIO is on; and when F_SETFL works, an SO_NBIO left on by an
+//    earlier fallback is switched off with O_NONBLOCK).
 //  - getaddrinfo jumps to address 0 in a native title (the module that holds it is not loaded). This one takes
 //    IPv4 literals itself and asks libSceNet's resolver for names, as fe_tlshttp.cpp does in the helper.
 //    IPv4 only, one result. Its results are freed by the freeaddrinfo below.
@@ -56,6 +57,17 @@ int __wrap_fcntl(int fd, int cmd, ...)
 		socklen_t len = sizeof on;
 		if (getsockopt(fd, SOL_SOCKET, SO_NBIO, &on, &len) == 0 && on)
 			return r | O_NONBLOCK;
+		return r;
+	}
+	if (r != -1 && cmd == F_SETFL)
+	{
+		// an earlier F_SETFL may have fallen back to SO_NBIO: when it is on, it follows this one too (clearing
+		// O_NONBLOCK through the console's fcntl would otherwise leave the socket non-blocking)
+		int on = 0;
+		socklen_t len = sizeof on;
+		const int want = (arg & O_NONBLOCK) != 0;
+		if (getsockopt(fd, SOL_SOCKET, SO_NBIO, &on, &len) == 0 && on && !want)
+			setsockopt(fd, SOL_SOCKET, SO_NBIO, &want, sizeof want);
 		return r;
 	}
 	if (r != -1 || (cmd != F_SETFL && cmd != F_GETFL))
